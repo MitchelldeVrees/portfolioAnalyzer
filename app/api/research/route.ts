@@ -2,7 +2,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
 import { fetchCuratedNewsForTickers, allowedDomains as preferredDomains } from "@/lib/news-curation";
-
+//testing
 export const runtime = "nodejs";
 
 const openai = new OpenAI({
