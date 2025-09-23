@@ -10,7 +10,7 @@ const openai = new OpenAI({
 });
 
 /** ========= Types ========= */
-
+//sotred api key
 type ISODate = string; // YYYY-MM-DD
 
 type ResearchJSON = {
