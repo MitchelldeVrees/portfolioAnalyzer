@@ -1,0 +1,345 @@
+// app/api/research/route.ts
+import { type NextRequest, NextResponse } from "next/server";
+import OpenAI from "openai";
+
+export const runtime = "nodejs";
+
+const openai = new OpenAI({
+  apiKey: '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', // set in your env
+});
+
+/** ========= Types ========= */
+
+type ISODate = string; // YYYY-MM-DD
+
+type ResearchJSON = {
+  performance: {
+    asOf: ISODate;
+    portfolioReturnPctYTD?: number;
+    portfolioReturnPct1M?: number;
+    benchmarkComparisons: Array<{
+      name: string; // e.g., "S&P 500", "XLK (Tech)"
+      period: "1M" | "3M" | "YTD";
+      benchmarkReturnPct: number;
+      relativeToBenchmarkPct: number; // portfolio minus benchmark for the period
+      comment: string;
+    }>;
+    drivers: string[]; // brief bullets on what drove performance (macro or sector-level)
+    caveats: string[]; // known gaps/assumptions
+  };
+  allocation: {
+    bySector: Array<{ sector: string; weightPct: number }>;
+    concentrationRisks: string[]; // e.g., "Over 40% in Tech"
+    futureProofingAssessment: {
+      summary: string; // argue why allocation is / isn't future-proof
+      tailwinds: string[]; // secular trends helping the mix
+      headwinds: string[]; // structural risks
+    };
+  };
+  contributions: {
+    lookbackDays: 7 | 14;
+    stocks: Array<{
+      ticker: string;
+      contributionEstimate?: "positive" | "neutral" | "negative"; // optional label from news
+      newsSupport: Array<{
+        title: string;
+        source: string;
+        date: ISODate; // MUST be within lookback window
+        url: string;
+        impact: "low" | "medium" | "high";
+        sentiment: "positive" | "neutral" | "negative";
+        thesis: string; // how this news plausibly affects the stock/portfolio
+      }>;
+      note: string; // MUST base judgments solely on the above news; no unstated assumptions
+    }>;
+  };
+  summary: {
+    keyPoints: string[]; // 3–6 bullets summarizing the entire portfolio
+    actions: string[]; // concise, actionable next steps
+    risksToMonitor: string[]; // concrete watch items
+  };
+  sources: Array<{ title: string; source: string; date: ISODate; url: string }>;
+};
+
+/** ========= Helpers ========= */
+
+function isoDateOnly(d: Date): ISODate {
+  return d.toISOString().slice(0, 10);
+}
+
+function withinLookback(dateStr: string, days: 7 | 14): boolean {
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() - days);
+  return new Date(dateStr) >= new Date(isoDateOnly(cutoff));
+}
+
+/** ========= Route ========= */
+
+export async function POST(request: NextRequest) {
+  try {
+    const { tickers, portfolioData, newsLookbackDays } = await request.json();
+    const lookback: 7 | 14 = newsLookbackDays === 7 ? 7 : 14; // default 14
+
+    const todayISO = isoDateOnly(new Date());
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - lookback);
+    const cutoffISO = isoDateOnly(cutoff);
+
+    // ——— Authoritative instructions for the model ———
+    const instructions = `
+You are a professional financial analyst creating research reports.
+
+CRITICAL NEWS WINDOW:
+- ONLY cite news published between ${cutoffISO} and ${todayISO} (inclusive).
+- If you cannot find a qualifying article for a ticker, say "No qualifying news in the last ${lookback} days."
+- NEVER include news older than ${lookback} days.
+
+SOURCING & CLAIMS:
+- Any opinion about an individual security inside the "contributions" section MUST be supported by at least one article in the specified window.
+- Include source (title, publisher, ISO date YYYY-MM-DD, URL) for every claim about companies or macro events.
+- Keep dates in ISO (YYYY-MM-DD). If uncertain, say so briefly.
+
+SCOPE & TONE:
+- Be precise, concise, and factual. Avoid boilerplate.
+- Where you infer impact to the portfolio, make the chain-of-reasoning explicit in one sentence (the "thesis" field), but do not add hidden assumptions.
+
+OUTPUT:
+- MUST return valid JSON that conforms to the provided JSON schema.
+- Do not include any text outside of the JSON.
+`;
+
+    const userPrompt = `
+Portfolio tickers: ${Array.isArray(tickers) ? tickers.join(", ") : String(tickers)}
+
+Portfolio metrics (raw input from system):
+${JSON.stringify(portfolioData?.metrics ?? {}, null, 2)}
+
+Deliver the following FOUR components:
+
+1) Portfolio performance:
+   - As-of date = "${todayISO}".
+   - Compare portfolio performance to 1–2 relevant benchmarks per major sector exposure (e.g., S&P 500, sector ETFs like XLK, XLF) across 1M / 3M / YTD where possible.
+   - Explain key drivers and disclose any caveats about data availability or proxies used.
+
+2) Asset allocations:
+   - Break down weights by sector (sum ≈ 100%).
+   - Call out concentration risks.
+   - Assess whether this mix is future-proof: list tailwinds / headwinds grounded in secular themes.
+
+3) Individual security contributions (NEWS-ONLY):
+   - For EACH ticker, search the web and list only articles dated between ${cutoffISO} and ${todayISO}.
+   - For each article: title, publisher, ISO date, URL, impact (low/medium/high), sentiment (positive/neutral/negative), and a one-sentence thesis explaining likely effect on the stock (and by extension the portfolio).
+   - Base any contribution label ("positive/neutral/negative") ONLY on the cited news in this window.
+
+4) Summary:
+   - 3–6 key bullets about the overall portfolio.
+   - Concrete next actions and risks to monitor.
+
+Return JSON conforming to the schema.`;
+
+// ——— JSON Schema enforcing the 4 components (strict mode compatible) ———
+const schema: Record<string, any> = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    performance: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        asOf: { type: "string" },
+        portfolioReturnPctYTD: { type: ["number", "null"] },
+        portfolioReturnPct1M: { type: ["number", "null"] },
+        benchmarkComparisons: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              name: { type: "string" },
+              period: { enum: ["1M", "3M", "YTD"] },
+              benchmarkReturnPct: { type: ["number", "null"] },
+              relativeToBenchmarkPct: { type: ["number", "null"] },
+              comment: { type: "string" },
+            },
+            // strict:true requires all keys listed here:
+            required: ["name", "period", "benchmarkReturnPct", "relativeToBenchmarkPct", "comment"],
+          },
+        },
+        drivers: { type: "array", items: { type: "string" } },
+        caveats: { type: "array", items: { type: "string" } },
+      },
+      // strict:true requires ALL keys in properties to be listed:
+      required: ["asOf", "portfolioReturnPctYTD", "portfolioReturnPct1M", "benchmarkComparisons", "drivers", "caveats"],
+    },
+
+    allocation: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        bySector: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              sector: { type: "string" },
+              weightPct: { type: ["number", "null"] },
+            },
+            required: ["sector", "weightPct"],
+          },
+        },
+        concentrationRisks: { type: "array", items: { type: "string" } },
+        futureProofingAssessment: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            summary: { type: "string" },
+            tailwinds: { type: "array", items: { type: "string" } },
+            headwinds: { type: "array", items: { type: "string" } },
+          },
+          required: ["summary", "tailwinds", "headwinds"],
+        },
+      },
+      required: ["bySector", "concentrationRisks", "futureProofingAssessment"],
+    },
+
+    contributions: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        lookbackDays: { enum: [7, 14] },
+        stocks: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              ticker: { type: "string" },
+              contributionEstimate: { enum: ["positive", "neutral", "negative", null] },
+              newsSupport: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    title: { type: "string" },
+                    source: { type: "string" },
+                    date: { type: "string" },
+                    url: { type: "string" },
+                    impact: { enum: ["low", "medium", "high"] },
+                    sentiment: { enum: ["positive", "neutral", "negative"] },
+                    thesis: { type: "string" },
+                  },
+                  required: ["title", "source", "date", "url", "impact", "sentiment", "thesis"],
+                },
+              },
+              note: { type: "string" },
+            },
+            required: ["ticker", "contributionEstimate", "newsSupport", "note"],
+          },
+        },
+      },
+      required: ["lookbackDays", "stocks"],
+    },
+
+    summary: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        keyPoints: { type: "array", items: { type: "string" } },
+        actions: { type: "array", items: { type: "string" } },
+        risksToMonitor: { type: "array", items: { type: "string" } },
+      },
+      required: ["keyPoints", "actions", "risksToMonitor"],
+    },
+
+    sources: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          title: { type: "string" },
+          source: { type: "string" },
+          date: { type: "string" },
+          url: { type: "string" },
+        },
+        required: ["title", "source", "date", "url"],
+      },
+    },
+  },
+  required: ["performance", "allocation", "contributions", "summary", "sources"],
+};
+
+
+    const ai = await openai.responses.create({
+      model: "gpt-4o-mini", // model supporting structured output via text.format
+      instructions,
+      input: userPrompt,
+      tools: [{ type: "web_search_preview" }],
+      tool_choice: "auto",
+      temperature: 0.2,
+      max_output_tokens: 2000,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "PortfolioResearchV2",
+          schema,
+          strict: true,
+        },
+      },
+    });
+
+    const text = ai.output_text; // SDK helper
+    const raw = JSON.parse(text) as ResearchJSON;
+
+    // —— Server-side belt & suspenders: filter any news that slipped past the window ——
+    const cleaned: ResearchJSON = {
+      ...raw,
+      contributions: {
+        ...raw.contributions,
+        lookbackDays: lookback,
+        stocks: (raw.contributions?.stocks ?? []).map((s) => ({
+          ...s,
+          newsSupport: (s.newsSupport ?? []).filter((n) => withinLookback(n.date, lookback)),
+        })),
+      },
+      sources: (raw.sources ?? []).filter((src) => withinLookback(src.date, lookback)),
+    };
+
+    // Example extra: sum up first 3 sources for easy display later if you want
+    const recommendations = [
+      {
+        type: "rebalance",
+        priority: "high",
+        description: "Trim overweight sectors to reduce concentration risk",
+        rationale: "Balance factor exposures and sector betas",
+        sources: cleaned.sources.slice(0, 3).map((s) => s.title),
+      },
+      {
+        type: "diversification",
+        priority: "medium",
+        description: "Add uncorrelated assets or defensive industries",
+        rationale: "Lower portfolio volatility and drawdown risk",
+        sources: cleaned.sources.slice(3, 6).map((s) => s.title),
+      },
+      {
+        type: "risk_management",
+        priority: "high",
+        description: "Define stop-loss/alerts on highest-beta names",
+        rationale: "Contain tail risk under elevated market volatility",
+        sources: cleaned.sources.slice(6, 9).map((s) => s.title),
+      },
+    ];
+
+    return NextResponse.json({
+      insights: cleaned, // keep top-level key "insights" if your frontend expects it; otherwise rename
+      recommendations,
+      meta: { cutoffISO, todayISO, lookbackDays: lookback },
+    });
+  } catch (error) {
+    console.error("Error generating research:", error);
+    return NextResponse.json({ error: "Failed to generate research" }, { status: 500 });
+  }
+}
+
