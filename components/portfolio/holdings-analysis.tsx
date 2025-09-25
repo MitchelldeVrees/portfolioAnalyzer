@@ -331,7 +331,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                   </DialogDescription>
                 </DialogHeader>
 
-                <ScrollArea className="max-h-[60vh] px-6 pb-6">
+                <ScrollArea className="h-[60vh] px-6 pb-6">
                   {/* Formula card */}
                   <div className="mt-4 rounded-2xl border p-4 bg-slate-50 dark:bg-slate-900/40">
                     <div className="text-sm text-slate-600 dark:text-slate-400 mb-2">

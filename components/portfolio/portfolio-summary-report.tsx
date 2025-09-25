@@ -40,6 +40,8 @@ interface Portfolio {
 
 interface PortfolioSummaryReportProps {
   portfolio: Portfolio | null | undefined
+    benchmark?: string
+
 }
 
 /** API response from /api/portfolio/[id]/summary */
@@ -74,7 +76,7 @@ interface ReportSection {
   keyMetrics: Array<{ label: string; value: string; trend?: "up" | "down" | "neutral" }>
 }
 
-export function PortfolioSummaryReport({ portfolio }: PortfolioSummaryReportProps) {
+export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: PortfolioSummaryReportProps) {
   const [isGenerating, setIsGenerating] = useState(false)
   const [isEmailing, setIsEmailing] = useState(false)
   const [today, setToday] = useState<string>("")
@@ -241,6 +243,7 @@ export function PortfolioSummaryReport({ portfolio }: PortfolioSummaryReportProp
       const response = await fetch(`/api/portfolio/${portfolio.id}/pdf`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ benchmark }),
       })
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}))

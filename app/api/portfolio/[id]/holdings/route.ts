@@ -11,6 +11,7 @@ type Holding = {
   shares?: number;
   purchase_price?: number | null;
   purchase_date?: string | null;
+  
 };
 
 const DEFAULT_BENCH = "^GSPC"; // Yahoo/our layer supports this
@@ -300,65 +301,73 @@ type RiskInputs = {
   shortPctFloat: number | null;
   shortRatio: number | null;
   daysToEarnings: number | null;
+  weightPct: number | null; // holding's share of portfolio in %
+
 };
 
 // returns 0..100 and detailed components
+// returns 0..100 and detailed components
 function computeRiskScore(x: RiskInputs) {
-  // --- Market risk (35%) ---
-  const sVol   = scoreLinear(x.vol12mPct ?? NaN, 15, 60) ?? 50;             // 15%→0, 60%→100
-  const sMDD   = scoreLinear(x.mdd12mPct ?? NaN, 10, 60) ?? 50;             // 10%→0, 60%→100
+  // --- existing component scores (unchanged logic) ---
+  const sVol   = scoreLinear(x.vol12mPct ?? NaN, 15, 60) ?? 50;
+  const sMDD   = scoreLinear(x.mdd12mPct ?? NaN, 10, 60) ?? 50;
   const sBeta  = (x.beta == null) ? 50 : clamp(Math.round(100 * Math.max(0, Math.abs(x.beta - 1) / 0.8)), 0, 100);
 
-  // --- Balance sheet (25%) ---
-  const sD2E   = scoreLinear(x.debtToEquity ?? NaN, 0, 250) ?? 50;          // 0→0, 250→100
+  const sD2E   = scoreLinear(x.debtToEquity ?? NaN, 0, 250) ?? 50;
   const sICov  = (x.interestCoverage == null) ? 50 :
-                 (x.interestCoverage <= 1 ? 100 : scoreLinear(x.interestCoverage, 2, 8, true)!); // <=1 = max risk
+                 (x.interestCoverage <= 1 ? 100 : scoreLinear(x.interestCoverage, 2, 8, true)!);
 
-  // --- Valuation (15%) ---
   const sPE    = (x.trailingPE != null && x.trailingPE > 0)
                    ? scoreLinear(x.trailingPE, 10, 40)!
                    : (x.ps != null ? scoreLinear(x.ps, 1, 10)! : 50);
-  const sPEG   = (x.peg != null) ? scoreLinear(x.peg, 1, 2.5)! : 50;        // PEG > 2.5 stretched
-  const sFCFY  = (x.fcfYieldPct != null) ? scoreLinear(x.fcfYieldPct, 5, 0)! : 50; // 5% yield → 0 risk; ≤0% → high
+  const sPEG   = (x.peg != null) ? scoreLinear(x.peg, 1, 2.5)! : 50;
+  const sFCFY  = (x.fcfYieldPct != null) ? scoreLinear(x.fcfYieldPct, 5, 0)! : 50;
 
-  // --- Liquidity (10%) ---
-  const sADV   = (x.avgDollarVol != null) ? scoreLinear(x.avgDollarVol, 50e6, 2e6, true)! : 50; // $50M→0, $2M→100
+  const sADV   = (x.avgDollarVol != null) ? scoreLinear(x.avgDollarVol, 50e6, 2e6, true)! : 50;
 
-  // --- Short interest / crowd (10%) ---
   const sShort = Math.max(
-    x.shortPctFloat != null ? scoreLinear(x.shortPctFloat, 2, 20)! : 0,     // 2%→0, 20%→100
-    x.shortRatio != null ? scoreLinear(x.shortRatio, 1, 8)! : 0             // 1→0, 8→100
+    x.shortPctFloat != null ? scoreLinear(x.shortPctFloat, 2, 20)! : 0,
+    x.shortRatio != null ? scoreLinear(x.shortRatio, 1, 8)! : 0
   ) || 50;
 
-  // --- Event risk (5%) ---
   const sEvt   = (x.daysToEarnings != null)
                    ? (x.daysToEarnings <= 7 ? 100 : x.daysToEarnings <= 21 ? 60 : 0)
                    : 20;
 
-  // weights
-  const score =
-    0.20 * sVol  + 0.10 * sMDD + 0.05 * sBeta +
-    0.15 * sD2E  + 0.10 * sICov +
-    0.06 * sPE   + 0.05 * sPEG + 0.04 * sFCFY +
-    0.10 * sADV  +
-    0.10 * sShort+
-    0.05 * sEvt;
+  // --- NEW: Position size (maps weight% to risk 0..100) ---
+  // Tune these bounds to your taste. Example:
+  // 1% position ~ 0 risk contribution; 15%+ ~ maxed risk.
+  const sPos   = (x.weightPct != null) ? scoreLinear(x.weightPct, 1, 15)! : 50;
+
+  // Keep existing mix, scaled by 0.9, and add 10% for position size.
+  const baseScore =
+      0.20 * sVol  + 0.10 * sMDD + 0.05 * sBeta +
+      0.15 * sD2E  + 0.10 * sICov +
+      0.06 * sPE   + 0.05 * sPEG + 0.04 * sFCFY +
+      0.10 * sADV  +
+      0.10 * sShort+
+      0.05 * sEvt;
+
+  const score = 0.90 * baseScore + 0.10 * sPos;
 
   const riskScore = Math.round(score);
   const bucket = riskScore < 33 ? "Low" : riskScore < 66 ? "Medium" : "High";
 
   const components = [
-    { key: "vol",   label: "Volatility (12m)",        score: sVol,   weight: 0.20, value: x.vol12mPct },
-    { key: "mdd",   label: "Max Drawdown (12m)",      score: sMDD,   weight: 0.10, value: x.mdd12mPct },
-    { key: "beta",  label: "Beta",                    score: sBeta,  weight: 0.05, value: x.beta },
-    { key: "d2e",   label: "Debt/Equity",             score: sD2E,   weight: 0.15, value: x.debtToEquity },
-    { key: "icov",  label: "Interest Coverage",       score: sICov,  weight: 0.10, value: x.interestCoverage },
-    { key: "pe",    label: "P/E (or P/S)",            score: sPE,    weight: 0.06, value: x.trailingPE ?? x.ps },
-    { key: "peg",   label: "PEG",                     score: sPEG,   weight: 0.05, value: x.peg },
-    { key: "fcfy",  label: "FCF Yield %",             score: sFCFY,  weight: 0.04, value: x.fcfYieldPct },
-    { key: "adv",   label: "Avg $ Volume (10d)",      score: sADV,   weight: 0.10, value: x.avgDollarVol },
-    { key: "short", label: "Short Interest",          score: sShort, weight: 0.10, value: x.shortPctFloat ?? x.shortRatio },
-    { key: "evt",   label: "Earnings Proximity",      score: sEvt,   weight: 0.05, value: x.daysToEarnings },
+    { key: "vol",   label: "Volatility (12m)",        score: sVol,   weight: 0.20 * 0.90, value: x.vol12mPct },
+    { key: "mdd",   label: "Max Drawdown (12m)",      score: sMDD,   weight: 0.10 * 0.90, value: x.mdd12mPct },
+    { key: "beta",  label: "Beta",                    score: sBeta,  weight: 0.05 * 0.90, value: x.beta },
+    { key: "d2e",   label: "Debt/Equity",             score: sD2E,   weight: 0.15 * 0.90, value: x.debtToEquity },
+    { key: "icov",  label: "Interest Coverage",       score: sICov,  weight: 0.10 * 0.90, value: x.interestCoverage },
+    { key: "pe",    label: "P/E (or P/S)",            score: sPE,    weight: 0.06 * 0.90, value: x.trailingPE ?? x.ps },
+    { key: "peg",   label: "PEG",                     score: sPEG,   weight: 0.05 * 0.90, value: x.peg },
+    { key: "fcfy",  label: "FCF Yield %",             score: sFCFY,  weight: 0.04 * 0.90, value: x.fcfYieldPct },
+    { key: "adv",   label: "Avg $ Volume (10d)",      score: sADV,   weight: 0.10 * 0.90, value: x.avgDollarVol },
+    { key: "short", label: "Short Interest",          score: sShort, weight: 0.10 * 0.90, value: x.shortPctFloat ?? x.shortRatio },
+    { key: "evt",   label: "Earnings Proximity",      score: sEvt,   weight: 0.05 * 0.90, value: x.daysToEarnings },
+
+    // NEW component
+    { key: "pos",   label: "Position Size (weight %)", score: sPos,  weight: 0.10,        value: x.weightPct },
   ];
 
   return { riskScore, bucket, components };
@@ -448,75 +457,87 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     const historyMap = Object.fromEntries(historyByTicker);
 
     // 5) Fetch risk inputs per symbol (daily vol/MDD + fundamentals)
-    const riskBySymbol = Object.fromEntries(
-      await Promise.all(
-        symbols.map(async (sym) => {
-          const [hist, f] = await Promise.all([fetchHistRisk(sym), fetchFundamentals(sym)]);
-          const risk = computeRiskScore({
-            vol12mPct: hist.vol12mPct,
-            mdd12mPct: hist.mdd12mPct,
-            beta: f.beta,
-            debtToEquity: f.debtToEquity,
-            interestCoverage: f.interestCoverage,
-            trailingPE: f.trailingPE,
-            ps: f.ps,
-            peg: f.peg,
-            fcfYieldPct: f.fcfYieldPct,
-            avgDollarVol: f.avgDollarVol,
-            shortPctFloat: f.shortPctFloat,
-            shortRatio: f.shortRatio,
-            daysToEarnings: f.daysToEarnings,
-          });
-          return [sym, { ...hist, beta: f.beta, risk }] as const;
-        })
-      )
-    );
+    const riskInputsBySymbol = Object.fromEntries(
+  await Promise.all(
+    symbols.map(async (sym) => {
+      const [hist, f] = await Promise.all([fetchHistRisk(sym), fetchFundamentals(sym)]);
+      return [sym, {
+        vol12mPct: hist.vol12mPct,
+        mdd12mPct: hist.mdd12mPct,
+        beta: f.beta,
+        debtToEquity: f.debtToEquity,
+        interestCoverage: f.interestCoverage,
+        trailingPE: f.trailingPE,
+        ps: f.ps,
+        peg: f.peg,
+        fcfYieldPct: f.fcfYieldPct,
+        avgDollarVol: f.avgDollarVol,
+        shortPctFloat: f.shortPctFloat,
+        shortRatio: f.shortRatio,
+        daysToEarnings: f.daysToEarnings,
+      }] as const;
+    })
+  )
+);
 
     // 6) Build final rows (prefer Yahoo-daily computations; fallback to monthly)
-    const final = enriched.map(h => {
-      const pts = (historyMap[h.ticker] as { date: string; close: number }[]) || [];
+    // 6) Build final rows
+const final = enriched.map(h => {
+  const pts = (historyMap[h.ticker] as { date: string; close: number }[]) || [];
 
-      // Fallback computations (monthly) if missing
-      let fallbackVol12m: number | null = null;
-      let fallbackBeta12m: number | null = null;
-      if (pts.length >= 6) {
-        const sIdx = pts.map(p => p.close);
-        const base = sIdx[0] || 100;
-        const norm = sIdx.map(v => (v / base) * 100);
+  // Fallback computations (monthly) if missing
+  let fallbackVol12m: number | null = null;
+  let fallbackBeta12m: number | null = null;
+  if (pts.length >= 6) {
+    const sIdx = pts.map(p => p.close);
+    const base = sIdx[0] || 100;
+    const norm = sIdx.map(v => (v / base) * 100);
 
-        fallbackVol12m = Number((annualizedVolatilityFromIndex(norm) * 100).toFixed(1));
+    fallbackVol12m = Number((annualizedVolatilityFromIndex(norm) * 100).toFixed(1));
 
-        if (benchNorm.length === norm.length && benchNorm.length >= 6) {
-          fallbackBeta12m = Number(estimateBeta(norm, benchNorm).toFixed(2));
-        }
-      }
+    if (benchNorm.length === norm.length && benchNorm.length >= 6) {
+      fallbackBeta12m = Number(estimateBeta(norm, benchNorm).toFixed(2));
+    }
+  }
 
-      const r = riskBySymbol[h.ticker];
+  // --- FETCHED inputs (daily Yahoo + fundamentals) ---
+  const inputs = riskInputsBySymbol[h.ticker];
 
-      const volatility12m = r?.vol12mPct ?? fallbackVol12m;
-      const beta12m = (typeof r?.beta === "number") ? Number(r.beta.toFixed(2))
-                    : (typeof fallbackBeta12m === "number" ? fallbackBeta12m : null);
+  // --- FIX: define these before returning the object ---
+  const volatility12m: number | null =
+    (inputs?.vol12mPct != null ? inputs.vol12mPct : null) ?? fallbackVol12m;
 
-      return {
-        id: h.id,
-        ticker: h.ticker,
-        sector: h.sector,
-        price: Number(h.price.toFixed(2)),
-        weightPct: Number(h.weightPct.toFixed(2)),
-        shares: Number(h.shares.toFixed(4)),
-        hasCostBasis: h.hasCostBasis,
-        returnSincePurchase: h.returnSincePurchase != null ? Number(h.returnSincePurchase.toFixed(2)) : null,
-        contributionPct: h.contributionPct != null ? Number(h.contributionPct.toFixed(2)) : null,
+  const beta12m: number | null =
+    (typeof inputs?.beta === "number" ? Number(inputs.beta.toFixed(2)) : null) ??
+    (typeof fallbackBeta12m === "number" ? fallbackBeta12m : null);
 
-        volatility12m,
-        beta12m,
+  // Compute risk score with position size (weightPct)
+  const { riskScore, bucket, components } = computeRiskScore({
+    ...inputs,
+    weightPct: h.weightPct,
+  });
 
-        // NEW robust risk fields
-        riskScore: r?.risk.riskScore ?? null,
-        riskBucket: r?.risk.bucket ?? "—",
-        riskComponents: r?.risk.components ?? [],
-      };
-    });
+  return {
+    id: h.id,
+    ticker: h.ticker,
+    sector: h.sector,
+    price: Number(h.price.toFixed(2)),
+    weightPct: Number(h.weightPct.toFixed(2)),
+    shares: Number(h.shares.toFixed(4)),
+    hasCostBasis: h.hasCostBasis,
+    returnSincePurchase: h.returnSincePurchase != null ? Number(h.returnSincePurchase.toFixed(2)) : null,
+    contributionPct: h.contributionPct != null ? Number(h.contributionPct.toFixed(2)) : null,
+
+    // now defined identifiers:
+    volatility12m,
+    beta12m,
+
+    riskScore,
+    riskBucket: bucket,
+    riskComponents: components,
+  };
+});
+
 
     const avgBetaWeighted = (() => {
       const valid = final.filter(f => typeof f.beta12m === "number");

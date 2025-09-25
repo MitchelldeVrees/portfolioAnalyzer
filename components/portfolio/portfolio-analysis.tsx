@@ -528,7 +528,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
         </TabsContent>
 
         <TabsContent value="report">
-          <PortfolioSummaryReport portfolio={portfolio} />
+          <PortfolioSummaryReport portfolio={portfolio} benchmark={benchmark} />
         </TabsContent>
       </Tabs>
     </div>
