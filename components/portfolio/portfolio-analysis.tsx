@@ -93,9 +93,10 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
 
   const hasBenchmark: boolean = !!portfolioData?.performanceMeta?.hasBenchmark
   const benchmarkLabel: string | undefined = portfolioData?.performanceMeta?.benchmark
-  const missingMsg = "Add purchase price & date for all holdings to enable benchmark."
+  const missingMsg = "Add shares for all holdings to enable benchmark."
 
-  const portfolioReturn: number = portfolioData?.metrics?.portfolioReturn ?? 0
+  const historicalPortfolioReturn: number = portfolioData?.metrics?.historicalPortfolioReturn ?? 0
+  const portfolioReturn: number = hasBenchmark ? historicalPortfolioReturn : portfolioData?.metrics?.portfolioReturn ?? 0
   const benchmarkReturn: number | null = portfolioData?.metrics?.benchmarkReturn ?? null
   const volatility: number = portfolioData?.metrics?.volatility ?? 0
   const sharpeRatio: number = portfolioData?.metrics?.sharpeRatio ?? 0
@@ -104,11 +105,9 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
 
   const diversificationScore: number | undefined = portfolioData?.risk?.diversification?.score
 
-  // NEW: SPX comparison beta fields
   const portfolioBetaSpx: number | null = portfolioData?.metrics?.portfolioBetaSpx ?? null
   const spxBeta: number = portfolioData?.metrics?.spxBeta ?? 1.0
   const betaDiff: number | null = portfolioData?.metrics?.betaDiff ?? null
-
 
   const getPerformanceIcon = (value: number) => {
     if (value > 0) return <TrendingUp className="w-4 h-4 text-green-600" />
@@ -130,8 +129,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
   }
 
   const sectorsForChart =
-  (portfolioData?.sectors ?? []).filter((s: any) => (s.allocation ?? 0) > 0.05) // ignore ~0% after rounding
-
+    (portfolioData?.sectors ?? []).filter((s: any) => (s.allocation ?? 0) > 0.05) // ignore ~0% after rounding
 
   // --- Active tilts & similarity (sector-level) ---
   const sectorsAll = (portfolioData?.sectors ?? []) as Array<{
@@ -156,7 +154,6 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
   // Top tilts
   const topOver = diffs.filter(d => d.diff > 0.5).sort((a,b) => b.diff - a.diff).slice(0,3);
   const topUnder = diffs.filter(d => d.diff < -0.5).sort((a,b) => a.diff - b.diff).slice(0,3);
-
 
   return (
     <div className="space-y-6">
@@ -208,7 +205,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
         {/* Portfolio Return */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Portfolio Return</CardTitle>
+            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Portfolio Return(YTD)</CardTitle>
           </CardHeader>
           <CardContent>
             {!hasBenchmark ? (
@@ -228,7 +225,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
         {/* vs Benchmark */}
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">vs Benchmark</CardTitle>
+            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">vs Benchmark(YTD)</CardTitle>
           </CardHeader>
           <CardContent>
             {!hasBenchmark || benchmarkReturn === null ? (
@@ -292,7 +289,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
         </Card>
       </div>
 
-      <Tabs defaultValue="analysis" className="space-y-6">
+      <Tabs defaultValue="analysis" className="space-y-6" key={benchmark}>
         <TabsList className="grid w-full grid-cols-4">
           <TabsTrigger value="analysis">Analysis</TabsTrigger>
           <TabsTrigger value="holdings">Holdings</TabsTrigger>
@@ -304,115 +301,90 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
         </TabsList>
 
         <TabsContent value="analysis" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center space-x-2">
-                <TrendingUp className="w-5 h-5" />
-                <span>Performance vs Benchmark</span>
-              </CardTitle>
-              <CardDescription>
-                {hasBenchmark
-                  ? `12-month portfolio performance vs ${benchmarkLabel}`
-                  : "Add purchase price & date to compare vs benchmark"}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {hasBenchmark ? (
-                <PerformanceChart
-                  data={portfolioData.performance}
-                  hasBenchmark={portfolioData?.performanceMeta?.hasBenchmark}
-                  benchmarkLabel={benchmarkLabel}
-                />
-              ) : (
-                <div className="text-sm text-slate-500">{missingMsg}</div>
-              )}
-            </CardContent>
-          </Card>
+          
 
-<div className="grid md:grid-cols-2 gap-6 items-start auto-rows-auto">
-  {/* LEFT COLUMN: stack pie + tilts */}
-  <div className="space-y-6">
-    {/* Pie (fixed responsive height) */}
-    <Card className="flex flex-col h-[240px] sm:h-[280px] md:h-[320px] lg:h-[380px]">
-      <CardHeader className="pb-2">
-        <CardTitle>Sector Allocation</CardTitle>
-        <CardDescription>Current allocation vs selected benchmark</CardDescription>
-      </CardHeader>
-      <CardContent className="flex-1 overflow-hidden">
-        {sectorsForChart.length ? (
-          <div className="h-full">
-            <AllocationChart data={sectorsForChart} />
-          </div>
-        ) : (
-          <div className="text-sm text-slate-500">No funded sectors yet.</div>
-        )}
-      </CardContent>
-    </Card>
+          <div className="grid md:grid-cols-2 gap-6 items-start auto-rows-auto">
+            {/* LEFT COLUMN: stack pie + tilts */}
+            <div className="space-y-6">
+              {/* Pie (fixed responsive height) */}
+              <Card className="flex flex-col h-[240px] sm:h-[280px] md:h-[320px] lg:h-[380px]">
+                <CardHeader className="pb-2">
+                  <CardTitle>Sector Allocation</CardTitle>
+                  <CardDescription>Current allocation vs selected benchmark</CardDescription>
+                </CardHeader>
+                <CardContent className="flex-1 overflow-hidden">
+                  {sectorsForChart.length ? (
+                    <div className="h-full">
+                      <AllocationChart data={sectorsForChart} />
+                    </div>
+                  ) : (
+                    <div className="text-sm text-slate-500">No funded sectors yet.</div>
+                  )}
+                </CardContent>
+              </Card>
 
-<Card className="flex flex-col">
+              <Card className="flex flex-col">
+                <CardHeader>
+                  <CardTitle>Active Sector Tilts</CardTitle>
+                  <CardDescription>How you differ from {benchmarkLabel}</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-sm text-slate-600 dark:text-slate-400">Active Share</div>
+                      <div className="text-2xl font-bold">{activeSharePct}%</div>
+                    </div>
+                    <div>
+                      <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark Match</div>
+                      <div className="text-2xl font-bold">
+                        {matchScore !== null ? `${matchScore}%` : "—"}
+                      </div>
+                    </div>
+                  </div>
+
+                  {topOver.length > 0 && (
+                    <div>
+                      <div className="text-sm font-medium mb-2">Top Overweights</div>
+                      <ul className="space-y-2">
+                        {topOver.map(s => (
+                          <li key={`over-${s.sector}`} className="flex items-center justify-between">
+                            <span className="text-sm">{s.sector}</span>
+                            <Badge className="bg-green-600 hover:bg-green-600 text-white">
+                              +{s.diff.toFixed(1)}%
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {topUnder.length > 0 && (
+                    <div>
+                      <div className="text-sm font-medium mb-2">Top Underweights</div>
+                      <ul className="space-y-2">
+                        {topUnder.map(s => (
+                          <li key={`under-${s.sector}`} className="flex items-center justify-between">
+                            <span className="text-sm">{s.sector}</span>
+                            <Badge variant="secondary" className="text-red-600 dark:text-red-400">
+                              {s.diff.toFixed(1)}%
+                            </Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </div>
+            {/* LEFT COLUMN (row 2): Allocation Analysis card */}
+            <Card className="flex flex-col row-span-2">
               <CardHeader>
-    <CardTitle>Active Sector Tilts</CardTitle>
-    <CardDescription>How you differ from {benchmarkLabel}</CardDescription>
-  </CardHeader>
-  <CardContent className="space-y-4">
-    <div className="grid grid-cols-2 gap-4">
-      <div>
-        <div className="text-sm text-slate-600 dark:text-slate-400">Active Share</div>
-        <div className="text-2xl font-bold">{activeSharePct}%</div>
-      </div>
-      <div>
-        <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark Match</div>
-        <div className="text-2xl font-bold">
-          {matchScore !== null ? `${matchScore}%` : "—"}
-        </div>
-      </div>
-    </div>
-
-    {topOver.length > 0 && (
-      <div>
-        <div className="text-sm font-medium mb-2">Top Overweights</div>
-        <ul className="space-y-2">
-          {topOver.map(s => (
-            <li key={`over-${s.sector}`} className="flex items-center justify-between">
-              <span className="text-sm">{s.sector}</span>
-              <Badge className="bg-green-600 hover:bg-green-600 text-white">
-                +{s.diff.toFixed(1)}%
-              </Badge>
-            </li>
-          ))}
-        </ul>
-      </div>
-    )}
-
-    {topUnder.length > 0 && (
-      <div>
-        <div className="text-sm font-medium mb-2">Top Underweights</div>
-        <ul className="space-y-2">
-          {topUnder.map(s => (
-            <li key={`under-${s.sector}`} className="flex items-center justify-between">
-              <span className="text-sm">{s.sector}</span>
-              <Badge variant="secondary" className="text-red-600 dark:text-red-400">
-                {s.diff.toFixed(1)}%
-              </Badge>
-            </li>
-          ))}
-        </ul>
-      </div>
-    )}
-  </CardContent>
-              
-            </Card>
-</div>
-{/* LEFT COLUMN (row 2): New “wow” card */}
-  <Card className="flex flex-col row-span-2">
- <CardHeader>
                 <CardTitle>Allocation Analysis</CardTitle>
-                {/* UPDATED description */}
                 <CardDescription>Sector allocation compared to benchmark weights</CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
                 {portfolioData.sectors.map((sector: any) => {
-                  const difference = sector.allocation - sector.target; // target === benchmark now
+                  const difference = sector.allocation - sector.target;
                   return (
                     <div key={sector.sector} className="space-y-2">
                       <div className="flex justify-between items-center">
@@ -435,10 +407,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                   )
                 })}
               </CardContent>
-</Card>
-
-
-
+            </Card>
           </div>
 
           <Card>
@@ -470,54 +439,48 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                 </div>
 
                 <div className="space-y-2">
-  <h4 className="font-medium text-slate-900 dark:text-slate-100">Beta (Market Risk)</h4>
-
-  {/* Portfolio Beta vs S&P 500 */}
-  <div className="flex items-baseline justify-between">
-    <div className="text-sm text-slate-600 dark:text-slate-400">Portfolio Beta</div>
-    <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-      {typeof portfolioBetaSpx === "number" ? portfolioBetaSpx.toFixed(2) : "—"}
-      <span className="text-base font-medium ml-2">
-        {portfolioData?.risk?.beta?.level ?? ""}
-      </span>
-    </div>
-  </div>
-
-  <div className="flex items-baseline justify-between">
-    <div className="text-sm text-slate-600 dark:text-slate-400">S&amp;P 500 Beta</div>
-    <div className="text-xl font-semibold text-slate-900 dark:text-slate-100">
-      {spxBeta.toFixed(2)}
-    </div>
-  </div>
-
-  {typeof betaDiff === "number" && (
-    <div className="pt-2 border-t mt-2 flex items-center justify-between">
-      <div className="text-sm text-slate-600 dark:text-slate-400">Difference</div>
-      <div
-        className={`text-lg font-bold ${
-          betaDiff > 0
-            ? "text-red-600 dark:text-red-400"       // riskier than SPX
-            : betaDiff < 0
-            ? "text-green-600 dark:text-green-400"    // less risky than SPX
-            : "text-slate-900 dark:text-slate-100"
-        }`}
-      >
-        {betaDiff > 0 ? "+" : ""}
-        {betaDiff.toFixed(2)}
-      </div>
-    </div>
-  )}
-  <p className="text-sm text-slate-600 dark:text-slate-400">
-    Comparison is always vs S&amp;P 500 (^GSPC). Your performance benchmark selector does not change beta.
-  </p>
-</div>
-
+                  <h4 className="font-medium text-slate-900 dark:text-slate-100">Beta (Market Risk)</h4>
+                  <div className="flex items-baseline justify-between">
+                    <div className="text-sm text-slate-600 dark:text-slate-400">Portfolio Beta</div>
+                    <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
+                      {typeof portfolioBetaSpx === "number" ? portfolioBetaSpx.toFixed(2) : "—"}
+                      <span className="text-base font-medium ml-2">
+                        {portfolioData?.risk?.beta?.level ?? ""}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-baseline justify-between">
+                    <div className="text-sm text-slate-600 dark:text-slate-400">S&amp;P 500 Beta</div>
+                    <div className="text-xl font-semibold text-slate-900 dark:text-slate-100">
+                      {spxBeta.toFixed(2)}
+                    </div>
+                  </div>
+                  {typeof betaDiff === "number" && (
+                    <div className="pt-2 border-t mt-2 flex items-center justify-between">
+                      <div className="text-sm text-slate-600 dark:text-slate-400">Difference</div>
+                      <div
+                        className={`text-lg font-bold ${
+                          betaDiff > 0
+                            ? "text-red-600 dark:text-red-400"
+                            : betaDiff < 0
+                            ? "text-green-600 dark:text-green-400"
+                            : "text-slate-900 dark:text-slate-100"
+                        }`}
+                      >
+                        {betaDiff > 0 ? "+" : ""}
+                        {betaDiff.toFixed(2)}
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-sm text-slate-600 dark:text-slate-400">
+                    Comparison is always vs S&amp;P 500 (^GSPC). Your performance benchmark selector does not change beta.
+                  </p>
+                </div>
               </div>
             </CardContent>
           </Card>
         </TabsContent>
 
-        {/* ✅ FIXED: pass the portfolio ID string, not holdings array */}
         <TabsContent value="holdings">
           <HoldingsAnalysis portfolioId={portfolio.id} />
         </TabsContent>
