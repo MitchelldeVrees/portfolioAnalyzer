@@ -22,7 +22,6 @@ interface PortfolioHolding {
   weight: number
   shares?: number
   purchase_price?: number
-  purchase_date?: string | null
 }
 
 interface Portfolio {

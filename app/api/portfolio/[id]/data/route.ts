@@ -11,7 +11,6 @@ type Holding = {
   weight: number;
   shares?: number;
   purchase_price?: number;
-  purchase_date?: string | null;
 };
 
 const DEFAULT_BENCH = "^GSPC"; // Yahoo supports ^GSPC, ^NDX, etc.
@@ -416,7 +415,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     }
 
     // 5) History for performance (only if we'll show benchmark)
-    const allHaveCostBasis = holdings.every((h) => h.purchase_price && h.purchase_date);
+    const allHaveCostBasis = holdings.every((h) => h.purchase_price );
     let benchHistory: { date: string; close: number }[] = [];
     try {
       benchHistory = await fetchHistoryMonthlyClose(userBenchmark, 12);
