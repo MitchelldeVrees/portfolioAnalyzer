@@ -37,7 +37,7 @@ export function AllocationChart({ data }: AllocationChartProps) {
             <Pie
               data={visible}
               // Leave some room for the legend below by moving the pie slightly up
-              cx="45%"
+              cx="50%%"
               cy="45%"
               innerRadius="45%"
               outerRadius="80%"

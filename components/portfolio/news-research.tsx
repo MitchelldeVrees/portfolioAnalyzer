@@ -46,6 +46,10 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date())
   const [error, setError] = useState<string | null>(null)
 
+  // Overlay state: show by default to indicate page is still in progress
+  const [overlayVisible, setOverlayVisible] = useState(true)
+  const contentRef = useRef<HTMLDivElement | null>(null)
+
   // Memoize tickers and use a stable key to avoid effect loops (kept for potential UI fallbacks)
   const tickers = useMemo(() => holdings.map((h) => (h.ticker || "").toUpperCase()).sort(), [holdings])
   const tickersKey = useMemo(() => tickers.join(","), [tickers])
@@ -59,95 +63,95 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
   }, [portfolioId])
 
   const loadResearchData = useCallback(async () => {
-  setIsLoading(true)
-  setError(null)
+    setIsLoading(true)
+    setError(null)
 
-  try {
-    const response = await fetch(`/api/portfolio/${portfolioId}/research`, { method: "GET" })
+    try {
+      const response = await fetch(`/api/portfolio/${portfolioId}/research`, { method: "GET" })
 
-    if (!response.ok) throw new Error("Failed to fetch research data")
+      if (!response.ok) throw new Error("Failed to fetch research data")
 
-    const data = await response.json()
+      const data = await response.json()
 
-    // ---- NEWS: use data.newsArticles if present; otherwise derive from structured insights.contributions.stocks[].newsSupport or insights.sources
-    const derivedFromSources =
-      Array.isArray(data?.insights?.sources)
-        ? data.insights.sources.map((s: any) => ({
-            title: s.title,
-            source: s.source,
-            date: s.date,
-            url: s.url,
-            sentiment: "neutral" as const,
-            impact: "medium" as const,
-            summary: "",
-          }))
+      // ---- NEWS: use data.newsArticles if present; otherwise derive from structured insights.contributions.stocks[].newsSupport or insights.sources
+      const derivedFromSources =
+        Array.isArray(data?.insights?.sources)
+          ? data.insights.sources.map((s: any) => ({
+              title: s.title,
+              source: s.source,
+              date: s.date,
+              url: s.url,
+              sentiment: "neutral" as const,
+              impact: "medium" as const,
+              summary: "",
+            }))
+          : []
+
+      const derivedFromStocksV2 = Array.isArray(data?.insights?.contributions?.stocks)
+        ? data.insights.contributions.stocks.flatMap((st: any) =>
+            Array.isArray(st.newsSupport)
+              ? st.newsSupport.map((n: any) => ({
+                  title: n.title,
+                  source: n.source,
+                  date: n.date,
+                  url: n.url,
+                  sentiment: n.sentiment ?? "neutral",
+                  impact: n.impact ?? "medium",
+                  summary: st.ticker ? `[${st.ticker}] ${n.thesis ?? ""}` : n.thesis ?? "",
+                }))
+              : [],
+          )
         : []
 
-    const derivedFromStocksV2 = Array.isArray(data?.insights?.contributions?.stocks)
-      ? data.insights.contributions.stocks.flatMap((st: any) =>
-          Array.isArray(st.newsSupport)
-            ? st.newsSupport.map((n: any) => ({
-                title: n.title,
-                source: n.source,
-                date: n.date,
-                url: n.url,
-                sentiment: n.sentiment ?? "neutral",
-                impact: n.impact ?? "medium",
-                summary: st.ticker ? `[${st.ticker}] ${n.thesis ?? ""}` : n.thesis ?? "",
-              }))
-            : [],
-        )
-      : []
+      const derivedFromStocksV1 = Array.isArray(data?.insights?.stocks)
+        ? data.insights.stocks.flatMap((st: any) =>
+            Array.isArray(st.recentNews)
+              ? st.recentNews.map((n: any) => ({
+                  title: n.title,
+                  source: n.source,
+                  date: n.date,
+                  url: n.url,
+                  sentiment: n.sentiment ?? "neutral",
+                  impact: n.impact ?? "medium",
+                  summary: st.ticker ? `[${st.ticker}] ${st.summary ?? ""}` : "",
+                }))
+              : [],
+          )
+        : []
 
-    const derivedFromStocksV1 = Array.isArray(data?.insights?.stocks)
-      ? data.insights.stocks.flatMap((st: any) =>
-          Array.isArray(st.recentNews)
-            ? st.recentNews.map((n: any) => ({
-                title: n.title,
-                source: n.source,
-                date: n.date,
-                url: n.url,
-                sentiment: n.sentiment ?? "neutral",
-                impact: n.impact ?? "medium",
-                summary: st.ticker ? `[${st.ticker}] ${st.summary ?? ""}` : "",
-              }))
-            : [],
-        )
-      : []
+      const normalizedNews: NewsArticle[] = Array.isArray(data.newsArticles)
+        ? data.newsArticles
+        : [...derivedFromStocksV2, ...derivedFromStocksV1, ...derivedFromSources]
 
-    const normalizedNews: NewsArticle[] = Array.isArray(data.newsArticles)
-      ? data.newsArticles
-      : [...derivedFromStocksV2, ...derivedFromStocksV1, ...derivedFromSources]
+      setNews(normalizedNews)
 
-    setNews(normalizedNews)
+      // ---- INSIGHTS: keep the raw object
+      setInsights(data.insights ?? null)
 
-    // ---- INSIGHTS: keep the raw object
-    setInsights(data.insights ?? null)
+      // ---- RECOMMENDATIONS: normalize to what your UI expects
+      const normalizedRecs = (Array.isArray(data.recommendations) ? data.recommendations : []).map((r: any) => ({
+        type: (r.type as ResearchInsight["type"]) ?? "rebalance",
+        title: r.title ?? r.description ?? "Recommendation",
+        description: r.description ?? "",
+        confidence: typeof r.confidence === "number" ? r.confidence : 0.85,
+        recommendation: r.recommendation ?? r.rationale ?? r.description ?? "",
+        sources: Array.isArray(r.sources) ? r.sources : [],
+        priority: r.priority ?? "medium",
+        rationale: r.rationale ?? "",
+        whyItMatters: r.whyItMatters ?? r.why ?? undefined,
+        consequences: r.consequences ?? r.implications ?? undefined,
+        evidence: Array.isArray(r.evidence) ? r.evidence : undefined,
+        sourceLinks: Array.isArray(r.sourceLinks) ? r.sourceLinks : undefined,
+      }))
 
-    // ---- RECOMMENDATIONS: normalize to what your UI expects
-    const normalizedRecs = (Array.isArray(data.recommendations) ? data.recommendations : []).map((r: any) => ({
-      type: (r.type as ResearchInsight["type"]) ?? "rebalance",
-      title: r.title ?? r.description ?? "Recommendation",
-      description: r.description ?? "",
-      confidence: typeof r.confidence === "number" ? r.confidence : 0.85,
-      recommendation: r.recommendation ?? r.rationale ?? r.description ?? "",
-      sources: Array.isArray(r.sources) ? r.sources : [],
-      priority: r.priority ?? "medium",
-      rationale: r.rationale ?? "",
-      whyItMatters: r.whyItMatters ?? r.why ?? undefined,
-      consequences: r.consequences ?? r.implications ?? undefined,
-      evidence: Array.isArray(r.evidence) ? r.evidence : undefined,
-      sourceLinks: Array.isArray(r.sourceLinks) ? r.sourceLinks : undefined,
-    }))
+      setRecommendations(normalizedRecs as any)
 
-    setRecommendations(normalizedRecs as any)
-
-    setLastUpdated(new Date())
-  } catch (err) {
-    setError(err instanceof Error ? err.message : "Failed to load research data")
-  } finally {
-    setIsLoading(false)
-  }
+      setLastUpdated(new Date())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load research data")
+    } finally {
+      setIsLoading(false)
+    }
   }, [portfolioId])
 
 
@@ -197,6 +201,7 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
     }
   }
 
+  // Accessibility helpers / UI utilities for overlay
   const getSentimentColor = (sentiment: string) => {
     switch (sentiment) {
       case "positive":
@@ -240,6 +245,42 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
         return "border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20"
     }
   }
+
+  // When overlay is visible, we try to disable interactions for most elements inside the component
+  // but keep tabs usable. We attempt to auto-detect common tab containers (role="tablist") and
+  // elements with [data-allow-interaction] and re-enable pointer events for them.
+  useEffect(() => {
+    const root = contentRef.current
+    if (!root) return
+
+    const applyBlock = () => {
+      // block interactions on root
+      root.classList.add("pointer-events-none", "select-none")
+      root.setAttribute("aria-hidden", "true")
+
+      // find elements that should still be interactive (tabs) and re-enable them
+      const allowEls = Array.from(root.querySelectorAll('[role="tablist"], .tabs, [data-allow-interaction]')) as HTMLElement[]
+      allowEls.forEach((el) => {
+        el.style.pointerEvents = "auto"
+        el.style.zIndex = "50"
+      })
+    }
+
+    const removeBlock = () => {
+      root.classList.remove("pointer-events-none", "select-none")
+      root.removeAttribute("aria-hidden")
+      const allowEls = Array.from(root.querySelectorAll('[role="tablist"], .tabs, [data-allow-interaction]')) as HTMLElement[]
+      allowEls.forEach((el) => {
+        el.style.pointerEvents = ""
+        el.style.zIndex = ""
+      })
+    }
+
+    if (overlayVisible) applyBlock()
+    else removeBlock()
+
+    return () => removeBlock()
+  }, [overlayVisible])
 
   if (error) {
     return (
@@ -286,165 +327,202 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
   }
 
   return (
-    <div className="space-y-6">
-      {/* AI-Powered Research Insights */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="flex items-center space-x-2">
-                <TrendingUp className="w-5 h-5" />
-                <span>AI-Powered Research Insights</span>
-              </CardTitle>
-              <CardDescription>
-                Research-backed recommendations based on current market analysis and news sentiment
-              </CardDescription>
+    <div className="relative" ref={contentRef}>
+      {/* Overlay modal: shows while the page is still in progress. Click outside or the button to dismiss. */}
+      {overlayVisible && (
+        <div className="fixed inset-0 z-40 flex items-start justify-center pt-24">
+          {/* Backdrop (click to dismiss) */}
+          <div
+            aria-hidden
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setOverlayVisible(false)}
+          />
+
+          {/* Modal box */}
+          <div
+            role="dialog"
+            aria-modal="true"
+            className="relative z-50 w-full max-w-xl mx-4 p-6 rounded-2xl bg-white dark:bg-slate-900 shadow-2xl border border-slate-200 dark:border-slate-800"
+            onClick={(e) => e.stopPropagation()} // keep clicks inside from closing
+          >
+            <h3 className="text-lg font-semibold mb-2">Still in progress</h3>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">
+              This page is still under active development. Most functionality on this page are currently disabled so
+              we can iterate safely. You can still switch tabs to navigate.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2">
+              <Button size="sm" variant="ghost" onClick={() => setOverlayVisible(false)}>
+                Dismiss
+              </Button>
             </div>
-            <Button variant="outline" size="sm" onClick={refreshData} disabled={isLoading}>
-              <RefreshCw className="w-4 h-4 mr-2" />
-              Refresh Analysis
-            </Button>
           </div>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {recommendations.map((rec, index) => (
-              <div key={index} className={`p-4 rounded-lg border ${getInsightColor(rec.type)}`}>
-                <div className="flex items-start space-x-3">
-                  {getInsightIcon(rec.type)}
-                  <div className="flex-1 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <h4 className="font-semibold text-slate-900 dark:text-slate-100">{rec.title}</h4>
-                      <div className="flex items-center space-x-2">
-                        <Badge variant="outline" className="text-xs">
-                          {rec.priority} priority
-                        </Badge>
-                        <Badge variant="outline" className="text-xs">
-                          Confidence: {Math.round((rec.confidence ?? 0.85) * 100)}%
-                        </Badge>
-                      </div>
-                    </div>
-                    <p className="text-sm text-slate-600 dark:text-slate-400">{rec.description}</p>
-                    {rec.whyItMatters && (
-                      <div className="bg-white dark:bg-slate-800 p-3 rounded border">
-                        <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                          <strong>Why it matters:</strong> {rec.whyItMatters}
-                        </p>
-                      </div>
-                    )}
-                    {rec.consequences && (
-                      <div className="bg-white dark:bg-slate-800 p-3 rounded border">
-                        <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                          <strong>Potential consequences:</strong> {rec.consequences}
-                        </p>
-                      </div>
-                    )}
-                    <div className="bg-white dark:bg-slate-800 p-3 rounded border">
-                      <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
-                        <strong>Recommendation:</strong> {rec.rationale}
-                      </p>
-                    </div>
-                    {rec.evidence && rec.evidence.length > 0 && (
-                      <div className="pt-2">
-                        <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
-                          <strong>Evidence:</strong>
-                        </p>
-                        <ul className="list-disc pl-5 space-y-1 text-xs text-slate-600 dark:text-slate-400">
-                          {rec.evidence.map((ev, i) => (
-                            <li key={i}>{ev}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                    {rec.sources && rec.sources.length > 0 && (
-                      <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
-                        <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
-                          <strong>Sources:</strong>
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {rec.sourceLinks && rec.sourceLinks.length > 0
-                            ? rec.sourceLinks.map((s, idx) => (
-                                <Badge key={idx} variant="outline" className="text-xs">
-                                  <a href={s.url} target="_blank" rel="noopener noreferrer">{s.title}</a>
-                                </Badge>
-                              ))
-                            : rec.sources.map((source, idx) => (
-                                <Badge key={idx} variant="outline" className="text-xs">
-                                  {source}
-                                </Badge>
-                              ))}
+        </div>
+      )}
+
+      {/* Main content (wrapped) */}
+      <div className="space-y-6">
+        {/* AI-Powered Research Insights */}
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="flex items-center space-x-2">
+                  <TrendingUp className="w-5 h-5" />
+                  <span>AI-Powered Research Insights</span>
+                </CardTitle>
+                <CardDescription>
+                  Research-backed recommendations based on current market analysis and news sentiment
+                </CardDescription>
+              </div>
+              <Button variant="outline" size="sm" onClick={refreshData} disabled={isLoading || overlayVisible}>
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Refresh Analysis
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {recommendations.map((rec, index) => (
+                <div key={index} className={`p-4 rounded-lg border ${getInsightColor(rec.type)}`}>
+                  <div className="flex items-start space-x-3">
+                    {getInsightIcon(rec.type)}
+                    <div className="flex-1 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <h4 className="font-semibold text-slate-900 dark:text-slate-100">{rec.title}</h4>
+                        <div className="flex items-center space-x-2">
+                          <Badge variant="outline" className="text-xs">
+                            {rec.priority} priority
+                          </Badge>
+                          <Badge variant="outline" className="text-xs">
+                            Confidence: {Math.round((rec.confidence ?? 0.85) * 100)}%
+                          </Badge>
                         </div>
                       </div>
-                    )}
+                      <p className="text-sm text-slate-600 dark:text-slate-400">{rec.description}</p>
+                      {rec.whyItMatters && (
+                        <div className="bg-white dark:bg-slate-800 p-3 rounded border">
+                          <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                            <strong>Why it matters:</strong> {rec.whyItMatters}
+                          </p>
+                        </div>
+                      )}
+                      {rec.consequences && (
+                        <div className="bg-white dark:bg-slate-800 p-3 rounded border">
+                          <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                            <strong>Potential consequences:</strong> {rec.consequences}
+                          </p>
+                        </div>
+                      )}
+                      <div className="bg-white dark:bg-slate-800 p-3 rounded border">
+                        <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                          <strong>Recommendation:</strong> {rec.rationale}
+                        </p>
+                      </div>
+                      {rec.evidence && rec.evidence.length > 0 && (
+                        <div className="pt-2">
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                            <strong>Evidence:</strong>
+                          </p>
+                          <ul className="list-disc pl-5 space-y-1 text-xs text-slate-600 dark:text-slate-400">
+                            {rec.evidence.map((ev, i) => (
+                              <li key={i}>{ev}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {rec.sources && rec.sources.length > 0 && (
+                        <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">
+                            <strong>Sources:</strong>
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {rec.sourceLinks && rec.sourceLinks.length > 0
+                              ? rec.sourceLinks.map((s, idx) => (
+                                  <Badge key={idx} variant="outline" className="text-xs">
+                                    <a href={s.url} target="_blank" rel="noopener noreferrer">{s.title}</a>
+                                  </Badge>
+                                ))
+                              : rec.sources.map((source, idx) => (
+                                  <Badge key={idx} variant="outline" className="text-xs">
+                                    {source}
+                                  </Badge>
+                                ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Market News with Sources */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Relevant Market News & Analysis</CardTitle>
-          <CardDescription>
-            Latest news affecting your portfolio holdings with AI sentiment analysis • Last updated{" "}
-            {formatDistanceToNow(lastUpdated, { addSuffix: true })}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {news.map((article, index) => (
-              <div
-                key={index}
-                className="border rounded-lg p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
-              >
-                <div className="flex items-start justify-between mb-2">
-                  <div className="flex items-center space-x-2">
-                    {getSentimentBadge(article.sentiment)}
-                    <Badge variant="outline" className="text-xs">
-                      {article.impact} impact
-                    </Badge>
-                  </div>
-                  <div className="flex items-center space-x-2 text-xs text-slate-500 dark:text-slate-400">
-                    <span>{article.source}</span>
-                    <span>•</span>
-                    <span>{article.date}</span>
-                  </div>
-                </div>
-
-                <h4 className="font-semibold text-slate-900 dark:text-slate-100 mb-2 leading-tight">{article.title}</h4>
-
-                <p className="text-sm text-slate-600 dark:text-slate-400 mb-3 leading-relaxed">{article.summary}</p>
-
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <span className="text-xs text-slate-500 dark:text-slate-400">
-                      AI Confidence: {Math.floor(Math.random() * 20 + 80)}%
-                    </span>
-                  </div>
-
-                  <Button variant="ghost" size="sm" asChild>
-                    <a href={article.url} target="_blank" rel="noopener noreferrer">
-                      <ExternalLink className="w-4 h-4 mr-1" />
-                      Read Full Article
-                    </a>
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {news.length === 0 && (
-            <div className="text-center py-8 text-slate-500 dark:text-slate-400">
-              <Info className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p>No recent news found for your portfolio holdings</p>
-              <p className="text-sm">AI analysis will update as new information becomes available</p>
+              ))}
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+
+        {/* Market News with Sources */}
+        <Card>
+          <CardHeader>
+            <CardTitle>Relevant Market News & Analysis</CardTitle>
+            <CardDescription>
+              Latest news affecting your portfolio holdings with AI sentiment analysis • Last updated{" "}
+              {formatDistanceToNow(lastUpdated, { addSuffix: true })}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {news.map((article, index) => (
+                <div
+                  key={index}
+                  className="border rounded-lg p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
+                >
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex items-center space-x-2">
+                      {getSentimentBadge(article.sentiment)}
+                      <Badge variant="outline" className="text-xs">
+                        {article.impact} impact
+                      </Badge>
+                    </div>
+                    <div className="flex items-center space-x-2 text-xs text-slate-500 dark:text-slate-400">
+                      <span>{article.source}</span>
+                      <span>•</span>
+                      <span>{article.date}</span>
+                    </div>
+                  </div>
+
+                  <h4 className="font-semibold text-slate-900 dark:text-slate-100 mb-2 leading-tight">{article.title}</h4>
+
+                  <p className="text-sm text-slate-600 dark:text-slate-400 mb-3 leading-relaxed">{article.summary}</p>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        AI Confidence: {Math.floor(Math.random() * 20 + 80)}%
+                      </span>
+                    </div>
+
+                    <Button variant="ghost" size="sm" asChild>
+                      <a href={article.url} target="_blank" rel="noopener noreferrer">
+                        <ExternalLink className="w-4 h-4 mr-1" />
+                        Read Full Article
+                      </a>
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {news.length === 0 && (
+              <div className="text-center py-8 text-slate-500 dark:text-slate-400">
+                <Info className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                <p>No recent news found for your portfolio holdings</p>
+                <p className="text-sm">AI analysis will update as new information becomes available</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }
+
+export default NewsResearch

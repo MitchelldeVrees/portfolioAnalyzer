@@ -10,7 +10,6 @@ type Holding = {
   weight: number;
   shares?: number;
   purchase_price?: number | null;
-  purchase_date?: string | null;
   
 };
 
@@ -408,7 +407,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       const q = quotesMap[h.ticker] || { price: 100, change: 0, changePercent: 0 };
       const shares = h.shares ?? (h.weight * 10000) / q.price; // fallback
       const totalValue = q.price * shares;
-      const hasCostBasis = !!(h.purchase_price && h.purchase_date);
+      const hasCostBasis = !!(h.purchase_price);
       const retSincePurchase = hasCostBasis && h.purchase_price
         ? ((q.price - h.purchase_price) / h.purchase_price) * 100
         : null;
