@@ -15,7 +15,6 @@ import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Progress } from "@/components/ui/progress"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   ArrowRight,
   ShieldCheck,
@@ -32,28 +31,23 @@ import {
   Activity,
 } from "lucide-react"
 import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
+  AreaChart,
+  Area,
   CartesianGrid,
   ResponsiveContainer,
   Tooltip,
-  AreaChart,
-  Area,
+  XAxis,
+  YAxis,
   PieChart,
   Pie,
   Cell,
-  BarChart,
-  Bar,
   Legend,
 } from "recharts"
+import { ExternalLink, AlertTriangle, Info } from "lucide-react"
 
 // ------------------------------------------------------------
-// This page is a one‑pager marketing/showcase for your app.
-// It uses the same design system (shadcn/ui + Tailwind),
-// animated with Framer Motion, with interactive fake data.
-// Drop it under app/(marketing)/features/page.tsx
+// One‑pager marketing/showcase for your app.
+// Drop under app/(marketing)/features/page.tsx
 // ------------------------------------------------------------
 
 const perfData = Array.from({ length: 12 }).map((_, i) => ({
@@ -62,6 +56,7 @@ const perfData = Array.from({ length: 12 }).map((_, i) => ({
   benchmark: 100 + i * 1.3,
 }))
 
+// Demo current portfolio sector allocation (sums to ~100)
 const allocationData = [
   { name: "Technology", value: 32 },
   { name: "Healthcare", value: 18 },
@@ -72,13 +67,192 @@ const allocationData = [
   { name: "Other", value: 7 },
 ]
 
-const barData = [
-  { ticker: "NVDA", contrib: 4.6, beta: 1.2 },
-  { ticker: "AAPL", contrib: 3.1, beta: 1.0 },
-  { ticker: "MSFT", contrib: 2.7, beta: 0.9 },
-  { ticker: "TSLA", contrib: -1.1, beta: 1.5 },
-  { ticker: "XOM", contrib: 0.9, beta: 1.1 },
+// --- Research demo types (mirrors analysis UI shape) ---
+type Sentiment = "positive" | "negative" | "neutral"
+type Impact = "high" | "medium" | "low"
+const REPORT_URL = "/portfolioSummary.pdf";
+
+interface DemoNewsArticle {
+  title: string
+  source: string
+  date: string   // display-only
+  url: string
+  sentiment: Sentiment
+  impact: Impact
+  summary: string
+}
+
+interface DemoResearchInsight {
+  type: "opportunity" | "risk" | "rebalance"
+  title: string
+  description: string
+  confidence: number   // 0..1
+  recommendation: string
+  sources: string[]
+  priority: "high" | "medium" | "low"
+  rationale?: string
+  whyItMatters?: string
+  consequences?: string
+  evidence?: string[]
+  sourceLinks?: Array<{ title: string; url: string }>
+}
+
+// --- Factual, evergreen recommendations (no market-timing claims) ---
+const DEMO_RECOMMENDATIONS: DemoResearchInsight[] = [
+  {
+    type: "rebalance",
+    title: "Trim overweight Technology to ~30%",
+    description:
+      "Portfolio shows a technology allocation materially above broad benchmarks.",
+    confidence: 0.9,
+    recommendation:
+      "Reduce Technology weight toward ~30% to lower concentration risk while preserving growth exposure.",
+    sources: ["Diversification best practices", "Benchmark sector weights"],
+    priority: "high",
+    rationale:
+      "Concentration in a single sector increases idiosyncratic risk; aligning closer to benchmark reduces volatility spikes.",
+    whyItMatters:
+      "Improves risk-adjusted profile without relying on short-term market timing.",
+    consequences:
+      "Slightly lower upside if Tech outperforms; improved drawdown characteristics if it underperforms.",
+    evidence: [
+      "Benchmarks (e.g., S&P 500 / MSCI World) typically keep single-sector weights below ~35%.",
+      "Academic literature: diversification reduces unsystematic risk."
+    ],
+    sourceLinks: [
+      { title: "What Is Diversification? (Investopedia)", url: "https://www.investopedia.com/terms/d/diversification.asp" },
+      { title: "Sector Weighting Basics (Investopedia)", url: "https://www.investopedia.com/terms/s/sector.asp" }
+    ]
+  },
+  {
+    type: "opportunity",
+    title: "Increase Healthcare tilt to 18–20%",
+    description:
+      "Healthcare historically exhibits defensive characteristics with consistent cash flows.",
+    confidence: 0.85,
+    recommendation:
+      "Increase Healthcare to ~18–20% using diversified ETFs or large-cap incumbents.",
+    sources: ["Sector defensiveness literature"],
+    priority: "medium",
+    rationale:
+      "Defensive sectors can stabilize returns across cycles and complement growth-heavy exposures.",
+    whyItMatters:
+      "Balances cyclicality; reduces sensitivity to broad market drawdowns.",
+    sourceLinks: [
+      { title: "Defensive Sectors Overview (Investopedia)", url: "https://www.investopedia.com/terms/d/defensivestock.asp" }
+    ]
+  },
+  {
+    type: "rebalance",
+    title: "Add 10% Developed ex-US exposure",
+    description:
+      "Home-country bias can reduce diversification benefits across currencies and economic regimes.",
+    confidence: 0.8,
+    recommendation:
+      "Allocate ~10% to developed ex-US (e.g., a broad ETF) to improve geographic diversification.",
+    sources: ["Global market composition"],
+    priority: "medium",
+    rationale:
+      "International exposure spreads macro and policy risks and may improve long-run risk-adjusted returns.",
+    sourceLinks: [
+      { title: "Home Bias in Portfolios (Investopedia)", url: "https://www.investopedia.com/terms/h/homebias.asp" }
+    ]
+  }
 ]
+
+// --- Evergreen, factual news/education cards (no time-sensitive claims) ---
+const DEMO_NEWS: DemoNewsArticle[] = [
+  {
+    title: "How diversification reduces unsystematic risk",
+    source: "Investopedia",
+    date: "Reference",
+    url: "https://www.investopedia.com/terms/d/diversification.asp",
+    sentiment: "neutral",
+    impact: "medium",
+    summary:
+      "A primer on diversification, portfolio construction, and why spreading exposures reduces single-name and sector risk."
+  },
+  {
+    title: "Understanding sector rotation and cyclicality",
+    source: "Investopedia",
+    date: "Reference",
+    url: "https://www.investopedia.com/terms/s/sectorrotation.asp",
+    sentiment: "neutral",
+    impact: "medium",
+    summary:
+      "Explains how leadership changes across sectors through the business cycle and what that implies for portfolio tilts."
+  },
+  {
+    title: "What portfolio beta says about market risk",
+    source: "Investopedia",
+    date: "Reference",
+    url: "https://www.investopedia.com/terms/b/beta.asp",
+    sentiment: "neutral",
+    impact: "low",
+    summary:
+      "Defines beta, how it’s calculated versus a benchmark like the S&P 500, and how it affects volatility expectations."
+  }
+]
+
+
+// Demo benchmark sector weights to mirror the analysis page logic (target weights)
+// NOTE: Numbers are illustrative; the UI computes tilts exactly like the analysis page
+const BENCHMARK_WEIGHTS: Record<string, Record<string, number>> = {
+  "^GSPC": {
+    Technology: 29,
+    Healthcare: 13,
+    Financials: 12,
+    Industrials: 9,
+    Consumer: 15,
+    Energy: 4,
+    Other: 18,
+  },
+  "^NDX": {
+    Technology: 58,
+    Healthcare: 7,
+    Financials: 1,
+    Industrials: 3,
+    Consumer: 24,
+    Energy: 0.5,
+    Other: 6.5,
+  },
+  URTH: {
+    Technology: 25,
+    Healthcare: 12,
+    Financials: 15,
+    Industrials: 11,
+    Consumer: 13,
+    Energy: 5,
+    Other: 19,
+  },
+  VT: {
+    Technology: 23,
+    Healthcare: 11,
+    Financials: 16,
+    Industrials: 12,
+    Consumer: 13,
+    Energy: 5,
+    Other: 20,
+  },
+  VEA: {
+    Technology: 12,
+    Healthcare: 12,
+    Financials: 18,
+    Industrials: 17,
+    Consumer: 14,
+    Energy: 5,
+    Other: 22,
+  },
+  EEM: {
+    Technology: 21,
+    Healthcare: 4,
+    Financials: 22,
+    Industrials: 8,
+    Consumer: 13,
+    Energy: 7,
+    Other: 25,
+  },
+}
 
 const COLORS = ["#2563eb", "#0ea5e9", "#22c55e", "#a78bfa", "#f59e0b", "#ef4444", "#14b8a6"]
 
@@ -86,6 +260,58 @@ export default function FeaturesPage() {
   const [benchmark, setBenchmark] = useState("^GSPC")
   const [isLoading, setIsLoading] = useState(false)
   const [activeCard, setActiveCard] = useState<string | null>(null)
+
+
+  function downloadUrl(url: string, filename?: string) {
+  const link = document.createElement("a");
+  link.href = url;
+  if (filename) link.download = filename; // Hint download; browsers may still open inline
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+function handleExportPdf() {
+  // show your nice loader first
+  setIsLoading(true);
+
+  // optional: ensure file exists before “completing”
+  // fetch(REPORT_URL, { method: "HEAD" }).catch(() => {}).finally(() => { ... })
+
+  setTimeout(() => {
+    downloadUrl(REPORT_URL, "Portfolio_Summary_Report.pdf");
+    setIsLoading(false);
+  }, 1200); // feels like “generation”
+}
+
+function handleEmailPdf() {
+  setIsLoading(true);
+  setTimeout(() => {
+    // Compose a new email with the link to the static PDF
+    const subject = "Your Portfolio Summary Report";
+    const body = `Hi,%0D%0A%0D%0AHere's the report:%0D%0A${window.location.origin}${REPORT_URL}%0D%0A%0D%0A– Sent from the demo`;
+    window.location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${body}`;
+    setIsLoading(false);
+  }, 1000);
+}
+
+  function sentimentBadge(sentiment: Sentiment) {
+  if (sentiment === "positive") return <Badge className="bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Positive</Badge>
+  if (sentiment === "negative") return <Badge className="bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">Negative</Badge>
+  return <Badge variant="secondary">Neutral</Badge>
+}
+
+function insightTint(type: DemoResearchInsight["type"]) {
+  if (type === "opportunity") return "border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-900/20"
+  if (type === "risk") return "border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20"
+  return "border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-900/20"
+}
+
+function insightIcon(type: DemoResearchInsight["type"]) {
+  if (type === "opportunity") return <TrendingUp className="w-5 h-5 text-green-600" />
+  if (type === "risk") return <AlertTriangle className="w-5 h-5 text-red-600" />
+  return <Info className="w-5 h-5 text-blue-600" />
+}
 
   // playful loading to showcase skeleton/animation
   useEffect(() => {
@@ -97,6 +323,44 @@ export default function FeaturesPage() {
     const last = perfData[perfData.length - 1]
     return ((last.portfolio - last.benchmark) / last.benchmark) * 100
   }, [])
+
+  // --- Active tilts logic mirroring analysis page (sector-level) ---
+  const sectorsAll = useMemo(() => {
+    const target = BENCHMARK_WEIGHTS[benchmark] ?? BENCHMARK_WEIGHTS["^GSPC"]
+    return allocationData.map((s) => ({
+      sector: s.name,
+      allocation: Number(s.value),
+      target: Number(target[s.name] ?? 0),
+    }))
+  }, [benchmark])
+
+  const diffs = useMemo(
+    () => sectorsAll.map((s) => ({ ...s, diff: Number((s.allocation - s.target).toFixed(1)) })),
+    [sectorsAll],
+  )
+
+  const activeSharePct = useMemo(() => {
+    const sumAbs = diffs.reduce((acc, s) => acc + Math.abs(s.diff), 0)
+    return Number((0.5 * sumAbs).toFixed(1))
+  }, [diffs])
+
+  const matchScore = useMemo(() => {
+    const dot = sectorsAll.reduce((acc, s) => acc + (s.allocation || 0) * (s.target || 0), 0)
+    const normP = Math.sqrt(sectorsAll.reduce((acc, s) => acc + Math.pow(s.allocation || 0, 2), 0))
+    const normB = Math.sqrt(sectorsAll.reduce((acc, s) => acc + Math.pow(s.target || 0, 2), 0))
+    return normP && normB ? Math.round((dot / (normP * normB)) * 100) : null
+  }, [sectorsAll])
+
+  const topOver = useMemo(
+    () => diffs.filter((d) => d.diff > 0.5).sort((a, b) => b.diff - a.diff).slice(0, 3),
+    [diffs],
+  )
+  const topUnder = useMemo(
+    () => diffs.filter((d) => d.diff < -0.5).sort((a, b) => a.diff - b.diff).slice(0, 3),
+    [diffs],
+  )
+
+  const sectorsForChart = allocationData.filter((s) => (s.value ?? 0) > 0.5)
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
@@ -178,18 +442,17 @@ export default function FeaturesPage() {
                 <div className="flex items-center gap-3">
                   <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark</div>
                   <Select value={benchmark} onValueChange={(v) => setBenchmark(v)}>
-                    <SelectTrigger className="w-44"><SelectValue placeholder="Select"/></SelectTrigger>
+                    <SelectTrigger className="w-48"><SelectValue placeholder="Select"/></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="^GSPC">S&P 500 (^GSPC)</SelectItem>
                       <SelectItem value="^NDX">NASDAQ 100 (^NDX)</SelectItem>
                       <SelectItem value="URTH">MSCI World (URTH)</SelectItem>
                       <SelectItem value="VT">Global (VT)</SelectItem>
+                      <SelectItem value="VEA">Developed ex‑US (VEA)</SelectItem>
+                      <SelectItem value="EEM">Emerging (EEM)</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Button variant="outline" size="sm" onClick={() => {setIsLoading(true); setTimeout(()=>setIsLoading(false), 900)}}>
-                    {isLoading ? <Activity className="w-4 h-4 mr-2 animate-spin"/> : <Sparkles className="w-4 h-4 mr-2"/>}
-                    Re‑simulate
-                  </Button>
+
                 </div>
               </CardHeader>
               <CardContent className="pt-0">
@@ -236,8 +499,8 @@ export default function FeaturesPage() {
                   <div className="h-72">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
-                        <Pie data={allocationData} dataKey="value" nameKey="name" innerRadius={60} outerRadius={100} paddingAngle={2}>
-                          {allocationData.map((_, i) => (
+                        <Pie data={sectorsForChart} dataKey="value" nameKey="name" innerRadius={60} outerRadius={100} paddingAngle={2}>
+                          {sectorsForChart.map((_, i) => (
                             <Cell key={i} fill={COLORS[i % COLORS.length]} />
                           ))}
                         </Pie>
@@ -249,26 +512,51 @@ export default function FeaturesPage() {
                 </CardContent>
               </Card>
 
-              <Card>
+              {/* UPDATED: Active Sector Tilts (mirrors analysis page) */}
+              <Card className="flex flex-col">
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2"><Gauge className="w-5 h-5"/>Active Tilts & Contributions</CardTitle>
-                  <CardDescription>Demo bar — contribution vs beta.</CardDescription>
+                  <CardTitle>Active Sector Tilts</CardTitle>
+                  <CardDescription>How you differ from the selected benchmark</CardDescription>
                 </CardHeader>
-                <CardContent>
-                  <div className="h-72">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={barData}>
-                        <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                        <XAxis dataKey="ticker" />
-                        <YAxis yAxisId="left" />
-                        <YAxis yAxisId="right" orientation="right" />
-                        <Tooltip />
-                        <Legend />
-                        <Bar yAxisId="left" dataKey="contrib" name="Contribution (pp)" fill="#2563eb" radius={[6,6,0,0]} />
-                        <Bar yAxisId="right" dataKey="beta" name="Beta" fill="#f59e0b" radius={[6,6,0,0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-sm text-slate-600 dark:text-slate-400">Active Share</div>
+                      <div className="text-2xl font-bold">{activeSharePct}%</div>
+                    </div>
+                    <div>
+                      <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark Match</div>
+                      <div className="text-2xl font-bold">{matchScore !== null ? `${matchScore}%` : "—"}</div>
+                    </div>
                   </div>
+
+                  {topOver.length > 0 && (
+                    <div>
+                      <div className="text-sm font-medium mb-2">Top Overweights</div>
+                      <ul className="space-y-2">
+                        {topOver.map((s) => (
+                          <li key={`over-${s.sector}`} className="flex items-center justify-between">
+                            <span className="text-sm">{s.sector}</span>
+                            <Badge className="bg-green-600 hover:bg-green-600 text-white">+{s.diff.toFixed(1)}%</Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {topUnder.length > 0 && (
+                    <div>
+                      <div className="text-sm font-medium mb-2">Top Underweights</div>
+                      <ul className="space-y-2">
+                        {topUnder.map((s) => (
+                          <li key={`under-${s.sector}`} className="flex items-center justify-between">
+                            <span className="text-sm">{s.sector}</span>
+                            <Badge variant="secondary" className="text-red-600 dark:text-red-400">{s.diff.toFixed(1)}%</Badge>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </div>
@@ -296,7 +584,7 @@ export default function FeaturesPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {barData.map((row, i) => (
+                      {[{ ticker: "NVDA", contrib: 4.6, beta: 1.2 }, { ticker: "AAPL", contrib: 3.1, beta: 1.0 }, { ticker: "MSFT", contrib: 2.7, beta: 0.9 }, { ticker: "TSLA", contrib: -1.1, beta: 1.5 }, { ticker: "XOM", contrib: 0.9, beta: 1.1 }].map((row, i) => (
                         <tr key={row.ticker} className="border-t border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50">
                           <td className="py-3 font-mono">{row.ticker}</td>
                           <td className="py-3">{(12 - i * 1.8).toFixed(1)}%</td>
@@ -323,54 +611,136 @@ export default function FeaturesPage() {
           </TabsContent>
 
           {/* RESEARCH */}
-          <TabsContent value="research" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2"><Newspaper className="w-5 h-5"/>Research & News</CardTitle>
-                <CardDescription>Pre‑generated insights, curated sources, and prioritized actions.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid md:grid-cols-3 gap-4">
-                  {[
-                    {
-                      title: "Trim overweight tech",
-                      body: "Reduce technology allocation from 35% → 30% to manage concentration risk.",
-                      tag: "Allocation",
-                    },
-                    {
-                      title: "Upgrade healthcare",
-                      body: "Increase healthcare to 20% through diversified ETFs or established pharma.",
-                      tag: "Sector",
-                    },
-                    {
-                      title: "Add international",
-                      body: "Add 10–15% developed ex‑US exposure to improve diversification.",
-                      tag: "Geography",
-                    },
-                  ].map((r, i) => (
-                    <motion.div
-                      key={r.title}
-                      initial={{ opacity: 0, y: 14, scale: 0.98 }}
-                      whileInView={{ opacity: 1, y: 0, scale: 1 }}
-                      viewport={{ once: true, amount: 0.3 }}
-                      transition={{ duration: 0.4, delay: i * 0.05 }}
-                      className="rounded-xl border p-4"
-                    >
-                      <div className="flex items-center justify-between">
-                        <h4 className="font-semibold text-slate-900 dark:text-slate-100">{r.title}</h4>
-                        <Badge>{r.tag}</Badge>
-                      </div>
-                      <p className="text-sm text-slate-600 dark:text-slate-400 mt-2">{r.body}</p>
-                      <div className="mt-3 flex gap-2">
-                        <Button size="sm" variant="outline">View sources</Button>
-                        <Button size="sm">Apply suggestion</Button>
-                      </div>
-                    </motion.div>
-                  ))}
+          {/* RESEARCH */}
+<TabsContent value="research" className="space-y-6">
+  {/* AI-Powered Research Insights (hardcoded demo) */}
+  <Card>
+    <CardHeader>
+      <div className="flex items-center justify-between">
+        <div>
+          <CardTitle className="flex items-center gap-2">
+            <Newspaper className="w-5 h-5" />
+            <span>AI-Powered Research Insights</span>
+          </CardTitle>
+          <CardDescription>
+            Research-backed recommendations using diversification and sector-tilt principles
+          </CardDescription>
+        </div>
+      </div>
+    </CardHeader>
+    <CardContent>
+      <div className="space-y-4">
+        {DEMO_RECOMMENDATIONS.map((rec, i) => (
+          <div key={i} className={`p-4 rounded-lg border ${insightTint(rec.type)}`}>
+            <div className="flex items-start gap-3">
+              {insightIcon(rec.type)}
+              <div className="flex-1 space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-semibold text-slate-900 dark:text-slate-100">{rec.title}</h4>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline" className="text-xs">{rec.priority} priority</Badge>
+                    <Badge variant="outline" className="text-xs">Confidence: {Math.round(rec.confidence * 100)}%</Badge>
+                  </div>
                 </div>
-              </CardContent>
-            </Card>
-          </TabsContent>
+                <p className="text-sm text-slate-600 dark:text-slate-400">{rec.description}</p>
+
+                {rec.whyItMatters && (
+                  <div className="bg-white dark:bg-slate-800 p-3 rounded border">
+                    <p className="text-sm"><strong>Why it matters:</strong> {rec.whyItMatters}</p>
+                  </div>
+                )}
+
+                {rec.consequences && (
+                  <div className="bg-white dark:bg-slate-800 p-3 rounded border">
+                    <p className="text-sm"><strong>Potential consequences:</strong> {rec.consequences}</p>
+                  </div>
+                )}
+
+                <div className="bg-white dark:bg-slate-800 p-3 rounded border">
+                  <p className="text-sm"><strong>Recommendation:</strong> {rec.recommendation || rec.rationale}</p>
+                </div>
+
+                {rec.evidence && rec.evidence.length > 0 && (
+                  <div className="pt-2">
+                    <p className="text-xs text-slate-500 mb-2"><strong>Evidence:</strong></p>
+                    <ul className="list-disc pl-5 space-y-1 text-xs text-slate-600 dark:text-slate-400">
+                      {rec.evidence.map((ev, idx) => <li key={idx}>{ev}</li>)}
+                    </ul>
+                  </div>
+                )}
+
+                {(rec.sourceLinks?.length || rec.sources.length) ? (
+                  <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
+                    <p className="text-xs text-slate-500 mb-2"><strong>Sources:</strong></p>
+                    <div className="flex flex-wrap gap-2">
+                      {(rec.sourceLinks?.length ? rec.sourceLinks : rec.sources.map(s => ({ title: s, url: "#" }))).map((s, idx) => (
+                        <Badge key={idx} variant="outline" className="text-xs">
+                          <a href={s.url} target="_blank" rel="noopener noreferrer">{s.title}</a>
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </CardContent>
+  </Card>
+
+  {/* Market News with Sources (hardcoded demo) */}
+  <Card>
+    <CardHeader>
+      <CardTitle>Relevant Market News & Education</CardTitle>
+      <CardDescription>Evergreen resources explaining concepts referenced in the insights</CardDescription>
+    </CardHeader>
+    <CardContent>
+      <div className="space-y-4">
+        {DEMO_NEWS.map((n, i) => (
+          <div key={i} className="border rounded-lg p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+            <div className="flex items-start justify-between mb-2">
+              <div className="flex items-center gap-2">
+                {sentimentBadge(n.sentiment)}
+                <Badge variant="outline" className="text-xs">{n.impact} impact</Badge>
+              </div>
+              <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                <span>{n.source}</span>
+                <span>•</span>
+                <span>{n.date}</span>
+              </div>
+            </div>
+
+            <h4 className="font-semibold text-slate-900 dark:text-slate-100 mb-2 leading-tight">
+              {n.title}
+            </h4>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mb-3 leading-relaxed">
+              {n.summary}
+            </p>
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-slate-500">Educational reference</span>
+              <Button variant="ghost" size="sm" asChild>
+                <a href={n.url} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="w-4 h-4 mr-1" />
+                  Read Article
+                </a>
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {DEMO_NEWS.length === 0 && (
+        <div className="text-center py-8 text-slate-500 dark:text-slate-400">
+          <Info className="w-12 h-12 mx-auto mb-4 opacity-50" />
+          <p>No items</p>
+        </div>
+      )}
+    </CardContent>
+  </Card>
+</TabsContent>
+
 
           {/* REPORT */}
           <TabsContent value="report" className="space-y-6">
@@ -387,33 +757,20 @@ export default function FeaturesPage() {
                   <Metric label="Sharpe" value="1.42" />
                 </div>
 
-          v      <div className="mt-6 flex flex-wrap gap-3">
-                  <Button onClick={() => fakeDelay(setIsLoading)} disabled={isLoading}>
-                    {isLoading ? <Activity className="w-4 h-4 mr-2 animate-spin"/> : <Download className="w-4 h-4 mr-2"/>}
-                    Export Professional PDF
-                  </Button>
-                  <Button variant="outline" onClick={() => fakeDelay(setIsLoading)} disabled={isLoading}>
-                    {isLoading ? <Activity className="w-4 h-4 mr-2 animate-spin"/> : <Mail className="w-4 h-4 mr-2"/>}
-                    Email Report
-                  </Button>
-                </div>
+                <div className="mt-6 flex flex-wrap gap-3">
+  <Button onClick={handleExportPdf} disabled={isLoading}>
+    {isLoading ? <Activity className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+    Export Professional PDF
+  </Button>
+  <Button variant="outline" onClick={handleEmailPdf} disabled={isLoading}>
+    {isLoading ? <Activity className="w-4 h-4 mr-2 animate-spin" /> : <Mail className="w-4 h-4 mr-2" />}
+    Email Report
+  </Button>
+</div>
+
 
                 {/* animated checklist */}
-                <div className="mt-8 grid md:grid-cols-3 gap-4">
-                  {[
-                    { t: "Executive summary", s: 100 },
-                    { t: "Performance vs benchmark", s: 100 },
-                    { t: "Risk & drawdowns", s: 100 },
-                    { t: "Sector allocation", s: 100 },
-                    { t: "Holdings table", s: 100 },
-                    { t: "Action items", s: 100 },
-                  ].map((it, i) => (
-                    <motion.div key={it.t} initial={{ opacity: 0 }} whileInView={{ opacity: 1 }} transition={{ delay: i * 0.05 }} className="rounded-xl border p-4">
-                      <div className="text-sm text-slate-600 mb-2">{it.t}</div>
-                      <Progress value={it.s} className="h-2" />
-                    </motion.div>
-                  ))}
-                </div>
+                
               </CardContent>
             </Card>
           </TabsContent>
