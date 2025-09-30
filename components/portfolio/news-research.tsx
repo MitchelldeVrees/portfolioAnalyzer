@@ -348,7 +348,7 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
             <h3 className="text-lg font-semibold mb-2">Still in progress</h3>
             <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">
               This page is still under active development. Most functionality on this page are currently disabled so
-              we can iterate safely. You can still switch tabs to navigate.
+              we can iterate safely. You can still see the page so you can get an understanding of it.
             </p>
 
             <div className="flex items-center justify-end space-x-2">

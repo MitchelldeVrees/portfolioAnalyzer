@@ -333,10 +333,7 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
               </div>
             </div>
             <div className="flex space-x-2">
-              <Button variant="outline" onClick={handleEmailReport} disabled={isEmailing || isGenerating}>
-                {isEmailing ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Mail className="w-4 h-4 mr-2" />}
-                {isEmailing ? "Sending..." : "Email Report"}
-              </Button>
+              
               <Button onClick={handleExportPDF} disabled={isGenerating || isEmailing}>
                 {isGenerating ? (
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />

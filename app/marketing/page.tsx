@@ -762,10 +762,7 @@ function insightIcon(type: DemoResearchInsight["type"]) {
     {isLoading ? <Activity className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
     Export Professional PDF
   </Button>
-  <Button variant="outline" onClick={handleEmailPdf} disabled={isLoading}>
-    {isLoading ? <Activity className="w-4 h-4 mr-2 animate-spin" /> : <Mail className="w-4 h-4 mr-2" />}
-    Email Report
-  </Button>
+
 </div>
 
 
