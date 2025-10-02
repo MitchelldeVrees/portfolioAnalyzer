@@ -1,4 +1,3 @@
-// /app/api/portfolio/[id]/data/route.ts
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchQuotesBatch, fetchHistoryMonthlyClose } from "@/lib/market-data";
@@ -354,17 +353,18 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
         performanceMeta: { hasBenchmark: false, benchmark: userBenchmark },
         sectors: [],
         metrics: {
-          portfolioReturn: 0,
+          // Removed portfolioReturn; added sortinoRatio with default 0
+          historicalPortfolioReturn: 0,
           benchmarkReturn: null,
           volatility: 0,
           sharpeRatio: 0,
+          sortinoRatio: 0, // NEW
           maxDrawdown: 0,
           beta: 0,
           totalValue: 0,
           portfolioBetaSpx: null,
           spxBeta: 1.0,
           betaDiff: null,
-          historicalPortfolioReturn: 0, // ADDED
         },
         risk: {
           concentration: { level: "Low", largestPositionPct: 0, top2Pct: 0, hhi: 0, effectiveHoldings: 0 },
@@ -379,6 +379,15 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     const quotesMap = await fetchQuotesBatch(symbols);
     await warmSectorCache(symbols); // async, don't await
 
+    // NEW: Fetch dynamic risk-free rate from Yahoo (^IRX for 13-week T-Bill)
+    let riskFree = 0.05; // Fallback
+    try {
+      const irxQuote = await yahooFinance.quote('^IRX');
+      riskFree = (irxQuote.regularMarketPrice || 4.04) / 100; // Divide by 100 to get decimal rate
+    } catch (e) {
+      console.warn('[risk-free] Failed to fetch ^IRX, using fallback 0.05:', (e as Error)?.message || e);
+    }
+
     // 3) Build holdingsData
     const holdingsData = holdings.map((h) => {
       const q = quotesMap[h.ticker] || { price: 100, change: 0, changePercent: 0 };
@@ -389,7 +398,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
 
     const totalValue = holdingsData.reduce((s, h) => s + h.totalValue, 0);
     const weights = holdingsData.map((h) => (totalValue > 0 ? h.totalValue / totalValue : 0));
-    const dailyPortfolioReturn = holdingsData.reduce((sum, h) => sum + (h.changePercent * h.totalValue) / (totalValue || 1), 0); // Renamed to daily
+    const dailyPortfolioReturn = holdingsData.reduce((sum, h) => sum + (h.changePercent * h.totalValue) / (totalValue || 1), 0); // Kept for potential use, but not in metrics
 
     // 3b) Fetch benchmark sector targets once per request
     const benchTargets = (await fetchBenchmarkSectorTargets(userBenchmark)) ?? fallbackTargets();
@@ -444,7 +453,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     const showBenchmark = benchHistory.length > 1 && hasPortfolioHistory;
 
     let performance: { date: string; portfolio: number; benchmark?: number }[] = [];
-    let vol = 0, beta = 0, mdd = 0, sharpe = 0, benchRet: number | null = null;
+    let vol = 0, beta = 0, mdd = 0, sharpe = 0, sortino = 0, benchRet: number | null = null; // Added sortino
     let historicalPortfolioReturn: number = 0;
 
     if (showBenchmark) {
@@ -485,12 +494,19 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
         const retsMonthly = pctReturns(normP);
         const avgMonthly = mean(retsMonthly);
         const annualRet = avgMonthly * 12;
-        const riskFree = 0.05;
         const volAnnual = vol / 100;
         sharpe = volAnnual > 0 ? (annualRet - riskFree) / volAnnual : 0;
 
+        // NEW: Compute Sortino ratio
+        const mar = 0; // Minimum acceptable return (monthly); can set to riskFree / 12 if preferred
+        const downsideDevs = retsMonthly.map(r => Math.pow(Math.min(0, r - mar), 2));
+        const downsideVar = mean(downsideDevs);
+        const downsideDevMonthly = Math.sqrt(downsideVar);
+        const downsideDevAnnual = downsideDevMonthly * Math.sqrt(12);
+        sortino = downsideDevAnnual > 0 ? (annualRet - riskFree) / downsideDevAnnual : 0;
+
         benchRet = Number((((normB.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
-        historicalPortfolioReturn = Number((((normP.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2)); // ADDED
+        historicalPortfolioReturn = Number((((normP.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
       } else {
         console.warn(`Insufficient history data for benchmark ${userBenchmark}`);
       }
@@ -521,11 +537,12 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       performanceMeta: { hasBenchmark: showBenchmark, benchmark: userBenchmark },
       sectors: sectors.sort((a, b) => b.allocation - a.allocation),
       metrics: {
-        portfolioReturn: Number(dailyPortfolioReturn.toFixed(2)),
-        historicalPortfolioReturn, // ADDED
+        // Replaced portfolioReturn (daily) with sharpeRatio and sortinoRatio as primary metrics
+        historicalPortfolioReturn, // Retained for context
         benchmarkReturn: benchRet,
         volatility: Number(vol.toFixed(1)),
         sharpeRatio: Number(sharpe.toFixed(2)),
+        sortinoRatio: Number(sortino.toFixed(2)), // NEW
         maxDrawdown: Number(mdd.toFixed(1)),
         beta: Number(beta.toFixed(2)),
         totalValue,

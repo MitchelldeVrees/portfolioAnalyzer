@@ -15,7 +15,7 @@ import { HoldingsAnalysis } from "./holdings-analysis"
 import { NewsResearch } from "./news-research"
 import { PortfolioSummaryReport } from "./portfolio-summary-report"
 import { useEffect, useState } from "react"
-
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 interface PortfolioHolding {
   id: string
   ticker: string
@@ -43,6 +43,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+
   useEffect(() => {
     let cancelled = false
     async function fetchPortfolioData() {
@@ -63,6 +64,15 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
       cancelled = true
     }
   }, [portfolio.id, benchmark])
+
+  const sortinoRatio: number = portfolioData?.metrics?.sortinoRatio ?? 0;
+
+  const getRatioColor = (value: number) => {
+  if (value > 2) return "text-green-600 dark:text-green-400"; // Good
+  if (value > 1) return "text-amber-500 dark:text-amber-400"; // Moderate
+  return "text-red-600 dark:text-red-400"; // Poor
+};
+
 
   // Pre-generate research on first load so it's ready when opening the tab
   useEffect(() => {
@@ -201,93 +211,97 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
         </div>
       </div>
 
-      <div className="grid md:grid-cols-5 gap-4">
-        {/* Portfolio Return */}
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Portfolio Return(YTD)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {!hasBenchmark ? (
-              <div className="text-sm text-slate-500">{missingMsg}</div>
-            ) : (
-              <div className={`text-2xl font-bold flex items-center space-x-2 ${getPerformanceColor(portfolioReturn)}`}>
-                {getPerformanceIcon(portfolioReturn)}
-                <span>
-                  {portfolioReturn > 0 ? "+" : ""}
-                  {portfolioReturn.toFixed(1)}%
-                </span>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+      <TooltipProvider>
+  <div className="grid md:grid-cols-5 gap-4">
+    {/* Sharpe Ratio Card */}
+    <Tooltip>
+  <Card>
+    <CardHeader className="pb-2">
+      <TooltipTrigger asChild>
+        <span>  {/* Add this span wrapper */}
+          <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Sharpe Ratio</CardTitle>
+        </span>
+      </TooltipTrigger>
+    </CardHeader>
+    <CardContent>
+      {!hasBenchmark ? (
+        <div className="text-sm text-slate-500">{missingMsg}</div>
+      ) : (
+        <div className={`text-2xl font-bold ${getRatioColor(sharpeRatio)}`}>
+          {sharpeRatio.toFixed(2)}
+        </div>
+      )}
+    </CardContent>
+  </Card>
+  <TooltipContent className="max-w-md">
+    <p>The Sharpe Ratio measures risk-adjusted return by dividing excess return (over risk-free rate) by total volatility. It's important for comparing investments, showing efficiency per unit of risk—higher values indicate better performance relative to risk. Desired: 1 (good), 0.5-1 (moderate), 0.5 (poor).</p>
+  </TooltipContent>
+</Tooltip>
 
-        {/* vs Benchmark */}
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">vs Benchmark(YTD)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {!hasBenchmark || benchmarkReturn === null ? (
-              <div className="text-sm text-slate-500">{missingMsg}</div>
-            ) : (
-              <div
-                className={`text-2xl font-bold flex items-center space-x-2 ${getPerformanceColor(
-                  portfolioReturn - benchmarkReturn,
-                )}`}
-              >
-                {getPerformanceIcon(portfolioReturn - benchmarkReturn)}
-                <span>
-                  {portfolioReturn - benchmarkReturn > 0 ? "+" : ""}
-                  {(portfolioReturn - benchmarkReturn).toFixed(1)}%
-                </span>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+    {/* vs Benchmark */}
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">vs Benchmark(YTD)</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {!hasBenchmark || benchmarkReturn === null ? (
+          <div className="text-sm text-slate-500">{missingMsg}</div>
+        ) : (
+          <div
+            className={`text-2xl font-bold flex items-center space-x-2 ${getPerformanceColor(
+              portfolioReturn - benchmarkReturn,
+            )}`}
+          >
+            {getPerformanceIcon(portfolioReturn - benchmarkReturn)}
+            <span>
+              {portfolioReturn - benchmarkReturn > 0 ? "+" : ""}
+              {(portfolioReturn - benchmarkReturn).toFixed(1)}%
+            </span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
 
-        {/* Volatility */}
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Volatility</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {!hasBenchmark ? (
-              <div className="text-sm text-slate-500">{missingMsg}</div>
-            ) : (
-              <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">{volatility.toFixed(1)}%</div>
-            )}
-          </CardContent>
-        </Card>
+    {/* Volatility */}
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Volatility</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {!hasBenchmark ? (
+          <div className="text-sm text-slate-500">{missingMsg}</div>
+        ) : (
+          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">{volatility.toFixed(1)}%</div>
+        )}
+      </CardContent>
+    </Card>
 
-        {/* Sharpe Ratio */}
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Sharpe Ratio</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {!hasBenchmark ? (
-              <div className="text-sm text-slate-500">{missingMsg}</div>
-            ) : (
-              <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">{sharpeRatio.toFixed(2)}</div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Max Drawdown */}
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Max Drawdown</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {!hasBenchmark ? (
-              <div className="text-sm text-slate-500">{missingMsg}</div>
-            ) : (
-              <div className={`text-2xl font-bold ${getPerformanceColor(maxDrawdown)}`}>{maxDrawdown.toFixed(1)}%</div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+    {/* Sortino Ratio Card */}
+    <Tooltip>
+  <Card>
+    <CardHeader className="pb-2">
+      <TooltipTrigger asChild>
+        <span>  {/* Add this span wrapper */}
+          <CardTitle className="text-sm font-medium text-slate-600 dark:text-slate-400">Sortino Ratio</CardTitle>
+        </span>
+      </TooltipTrigger>
+    </CardHeader>
+    <CardContent>
+      {!hasBenchmark ? (
+        <div className="text-sm text-slate-500">{missingMsg}</div>
+      ) : (
+        <div className={`text-2xl font-bold ${getRatioColor(sortinoRatio)}`}>
+          {sortinoRatio.toFixed(2)}
+        </div>
+      )}
+    </CardContent>
+  </Card>
+  <TooltipContent className="max-w-md">
+    <p>The Sortino Ratio refines Sharpe by focusing only on downside volatility (negative returns). It's crucial for risk-averse investors as it penalizes only harmful risk, making it ideal for volatile assets. Desired: 1.5 (good), 0.8-2.0 typical, often higher than Sharpe.</p>
+  </TooltipContent>
+</Tooltip>
+  </div>
+</TooltipProvider>
 
       <Tabs defaultValue="analysis" className="space-y-6" key={benchmark}>
         <TabsList className="grid w-full grid-cols-4">
@@ -413,7 +427,6 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
           <Card>
             <CardHeader>
               <CardTitle>Risk Analysis</CardTitle>
-              <CardDescription>Rule-based concentration, diversification, and market risk</CardDescription>
             </CardHeader>
             <CardContent>
               <div className="grid md:grid-cols-3 gap-6">

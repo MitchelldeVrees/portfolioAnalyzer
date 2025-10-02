@@ -45,6 +45,10 @@ function scoreFromTargetRange(val: number, idealMin: number, idealMax: number, h
   return clamp01((hardMax - val) / (hardMax - idealMax))
 }
 
+function isNumber(v: any): v is number {
+  return typeof v === "number" && isFinite(v)
+}
+
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   try {
     const url = new URL(req.url)
@@ -62,12 +66,32 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     }
     const d = (await dataRes.json()) as DataResponse
 
+    // --- defensive normalization & helpers ---
+    const holdingsArr = Array.isArray(d?.holdings) ? d.holdings : []
+    const sectorsArr = Array.isArray(d?.sectors) ? d.sectors : []
+
+    // safe numeric extraction (defaults chosen conservatively)
+    const portfolioReturn = isNumber(d?.metrics?.portfolioReturn) ? d.metrics.portfolioReturn : 0
+    const benchmarkReturn = isNumber(d?.metrics?.benchmarkReturn) ? (d.metrics.benchmarkReturn as number) : null
+    const vol = isNumber(d?.metrics?.volatility) ? d.metrics.volatility : 15
+    const sharpeRatio = isNumber(d?.metrics?.sharpeRatio) ? d.metrics.sharpeRatio : null
+    const beta = isNumber(d?.metrics?.beta) ? d.metrics.beta : 1
+    const mdd = isNumber(d?.metrics?.maxDrawdown) ? d.metrics.maxDrawdown : -20
+    const largest = isNumber(d?.risk?.concentration?.largestPositionPct) ? d.risk.concentration.largestPositionPct : 15
+    const diversificationScoreRaw = isNumber(d?.risk?.diversification?.score) ? d.risk.diversification.score : 5
+
+    // formatting helper — safe .toFixed replacement
+    const fmt = (v: number | null | undefined, digits = 1) =>
+      isNumber(v) ? Number(v.toFixed(digits)) : null
+
+    const fmtStr = (v: number | null | undefined, digits = 1) =>
+      isNumber(v) ? v.toFixed(digits) : "—"
+
     // ---------- Basic KPIs ----------
-    const holdingsCount = d?.risk?.diversification?.holdings ?? d.holdings?.length ?? 0
-    const sharpeRatio = d?.metrics?.sharpeRatio ?? null
+    const holdingsCount = d?.risk?.diversification?.holdings ?? holdingsArr.length ?? 0
 
     // Total return (since purchase) – only if cost basis exists for a majority of the portfolio
-    const withCost = d.holdings.filter(h => typeof h.returnSincePurchase === "number" && isFinite(h.returnSincePurchase as number))
+    const withCost = holdingsArr.filter(h => typeof h.returnSincePurchase === "number" && isFinite(h.returnSincePurchase as number))
     const weightSumWithCost = withCost.reduce((a, h) => a + (h.weightPct || 0), 0)
     const hasMeaningfulCostBasis = weightSumWithCost >= 50 // >=50% of weight has cost basis
 
@@ -78,49 +102,38 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
 
     // ---------- Allocation scoring ----------
     // Active share at sector level: 0.5 * sum(|allocation - target|)
-    const diffs = (d.sectors ?? []).map(s => Math.abs((s.allocation ?? 0) - (s.target ?? 0)))
+    const diffs = sectorsArr.map(s => Math.abs((s.allocation ?? 0) - (s.target ?? 0)))
     const activeShare = 0.5 * diffs.reduce((a, b) => a + b, 0) // 0..100
     // Lower is better. 0% -> 100 score, 30%+ -> floor near 20.
     const allocationScore = clamp01(1 - activeShare / 30) * 0.8 + 0.2 // soften
 
     // Diversification comes 0..10 in your data – rescale
-    const diversificationScoreRaw = typeof d?.risk?.diversification?.score === "number" ? d.risk.diversification.score : 5
     const diversificationScore = clamp01(diversificationScoreRaw / 10)
 
     // Concentration – largest position; <=10% ideal, >30% poor
-    const largest = d?.risk?.concentration?.largestPositionPct ?? 15
     const concentrationScore = scoreFromTargetRange(largest, 0, 10, 0, 30)
 
     // ---------- Risk scoring ----------
-    const vol = d?.metrics?.volatility ?? 15
     const volScore = scoreFromTargetRange(vol, 10, 15, 5, 35)
 
-    const beta = typeof d?.metrics?.beta === "number" ? d.metrics.beta : 1
     const betaScore = clamp01(1 - Math.min(Math.abs(beta - 1), 1)) // closeness to 1
 
-    const mdd = d?.metrics?.maxDrawdown ?? -20 // negative number
     // Less negative is better: -5% ideal, -35% poor
     const drawdownScore = scoreFromTargetRange(Math.abs(mdd), 5, 12, 0, 35)
 
     // ---------- Performance scoring ----------
-    const rel = typeof d?.metrics?.benchmarkReturn === "number"
-      ? (d.metrics.portfolioReturn - (d.metrics.benchmarkReturn as number))
-      : null
+    const rel = isNumber(benchmarkReturn) ? (portfolioReturn - (benchmarkReturn as number)) : null
 
     //  +10pp vs. benchmark -> great; -10pp -> poor. Map -15..+15 to 0..1
     const relScore = rel == null ? 0.5 : clamp01((rel + 15) / 30)
 
     // Absolute YTD also nudges – 0..30% to 0..1
-    const absScore = clamp01((d.metrics.portfolioReturn) / 30)
+    const absScore = clamp01(portfolioReturn / 30)
 
     const performanceScore = rel == null ? 0.5 * absScore + 0.5 * 0.5 : 0.6 * relScore + 0.4 * absScore
 
     // ---------- Quality / “fundamentals proxy” ----------
-    // We don’t have full fundamentals here, so we proxy with per-holding risk/return:
-    //   + Positive contribution & return
-    //   + Lower vol & beta closer to 1
-    // Weighted by weightPct.
-    const q = d.holdings.map(h => {
+    const q = holdingsArr.map(h => {
       const w = (h.weightPct ?? 0) / 100
       const rr = typeof h.returnSincePurchase === "number" ? clamp01((h.returnSincePurchase + 25) / 50) : 0.5 // -25..+25 → 0..1
       const contrib = typeof h.contributionPct === "number" ? clamp01((h.contributionPct + 2) / 4) : 0.5 // -2..+2 → 0..1
@@ -152,9 +165,9 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
         weight: weights.allocation,
         score: allocationBlend,
         rationale: [
-          `Active sector difference ~${activeShare.toFixed(1)}%`,
-          `Diversification score ${(diversificationScoreRaw ?? 0).toFixed(1)}/10`,
-          `Largest position ${largest.toFixed(1)}%`,
+          `Active sector difference ~${fmtStr(activeShare, 1)}%`,
+          `Diversification score ${fmtStr(diversificationScoreRaw, 1)}/10`,
+          `Largest position ${fmtStr(largest, 1)}%`,
         ],
       },
       {
@@ -163,9 +176,8 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
         weight: weights.risk,
         score: riskBlend,
         rationale: [
-          `Volatility ${vol.toFixed(1)}%`,
-          `Max drawdown ${mdd.toFixed(1)}%`,
-          `Beta ${beta.toFixed(2)}`,
+          `Volatility ${fmtStr(vol, 1)}%`,
+          `Beta ${isNumber(beta) ? beta.toFixed(2) : "—"}`,
         ],
       },
       {
@@ -174,8 +186,8 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
         weight: weights.performance,
         score: performanceScore,
         rationale: [
-          `YTD ${d.metrics.portfolioReturn.toFixed(1)}%`,
-          `Rel. to benchmark ${rel == null ? "—" : `${rel.toFixed(1)}pp`}`,
+          `YTD ${fmtStr(portfolioReturn, 1)}%`,
+          `Rel. to benchmark ${rel == null ? "—" : `${Number(rel.toFixed(1))}pp`}`,
         ],
       },
       {
@@ -220,8 +232,8 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     else negatives.push("Beta deviates materially from 1")
 
     if (rel != null) {
-      if (rel >= 0) positives.push(`Outperforming benchmark by ${rel.toFixed(1)}pp`)
-      else negatives.push(`Underperforming benchmark by ${Math.abs(rel).toFixed(1)}pp`)
+      if (rel >= 0) positives.push(`Outperforming benchmark by ${Number(rel.toFixed(1))}pp`)
+      else negatives.push(`Underperforming benchmark by ${Math.abs(Number(rel.toFixed(1)))}pp`)
     }
 
     return NextResponse.json({
