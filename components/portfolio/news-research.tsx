@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { LoadingButton } from "@/components/ui/loading-button"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ExternalLink, TrendingUp, AlertTriangle, Info, RefreshCw } from "lucide-react"
@@ -289,10 +290,15 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
           <div className="text-center py-8">
             <AlertTriangle className="w-12 h-12 mx-auto mb-4 text-red-500" />
             <p className="text-red-600 dark:text-red-400 mb-4">Error: {error}</p>
-            <Button onClick={refreshData} variant="outline">
-              <RefreshCw className="w-4 h-4 mr-2" />
-              Retry
-            </Button>
+            <LoadingButton
+              onClick={refreshData}
+              variant="outline"
+              loading={isLoading}
+              loadingText="Refreshing..."
+              spinnerPlacement="start"
+            >
+              <RefreshCw className="w-4 h-4 mr-2" /> Retry
+            </LoadingButton>
           </div>
         </CardContent>
       </Card>
@@ -375,10 +381,18 @@ export function NewsResearch({ portfolioId, holdings = [] }: NewsResearchProps) 
                   Research-backed recommendations based on current market analysis and news sentiment
                 </CardDescription>
               </div>
-              <Button variant="outline" size="sm" onClick={refreshData} disabled={isLoading || overlayVisible}>
+              <LoadingButton
+                variant="outline"
+                size="sm"
+                onClick={refreshData}
+                loading={isLoading}
+                loadingText="Refreshing..."
+                spinnerPlacement="start"
+                disabled={overlayVisible}
+              >
                 <RefreshCw className="w-4 h-4 mr-2" />
                 Refresh Analysis
-              </Button>
+              </LoadingButton>
             </div>
           </CardHeader>
           <CardContent>

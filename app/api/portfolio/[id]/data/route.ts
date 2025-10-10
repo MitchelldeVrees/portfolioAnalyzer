@@ -331,6 +331,11 @@ async function computePortfolioBetaSpx(symbols: string[], weights: number[]) { c
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const supabase = await createServerClient();
+
+    const { data: auth, error: authError } = await supabase.auth.getUser();
+    if (authError || !auth?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     const url = new URL(request.url);
     const userBenchmark = url.searchParams.get("benchmark") || DEFAULT_BENCH;
 
@@ -339,6 +344,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       .from("portfolios")
       .select(`*, portfolio_holdings (*)`)
       .eq("id", params.id)
+      .eq("user_id", auth.user.id)
       .single();
 
     if (error || !portfolio) {
@@ -561,3 +567,4 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+

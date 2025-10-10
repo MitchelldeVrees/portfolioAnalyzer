@@ -3,7 +3,7 @@
 import type React from "react"
 
 import { createClient } from "@/lib/supabase/client"
-import { Button } from "@/components/ui/button"
+import { LoadingButton } from "@/components/ui/loading-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -133,9 +133,15 @@ export default function SignUpPage() {
                   {error}
                 </div>
               )}
-              <Button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white" disabled={isLoading}>
-                {isLoading ? "Creating account..." : "Create Account"}
-              </Button>
+              <LoadingButton
+                type="submit"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white"
+                loading={isLoading}
+                loadingText="Creating account..."
+                spinnerPlacement="start"
+              >
+                Create Account
+              </LoadingButton>
             </form>
             <div className="text-center text-sm text-slate-600 dark:text-slate-400">
               Already have an account?{" "}

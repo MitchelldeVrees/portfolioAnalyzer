@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
+import { LoadingButton } from "@/components/ui/loading-button"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { FileDown, ExternalLink } from "lucide-react"
@@ -60,6 +60,7 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
   const [research, setResearch] = useState<ResearchResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
+  const [isDownloading, setIsDownloading] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -103,6 +104,7 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
 
   const handleDownload = async () => {
     try {
+      setIsDownloading(true)
       const res = await fetch(`/api/portfolio/${portfolioId}/pdf`, { method: "POST" })
       if (!res.ok) throw new Error("Failed to generate report")
       const { html, filename } = await res.json()
@@ -119,6 +121,8 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
       // window.open(url, "_blank")
     } catch (e) {
       alert(e instanceof Error ? e.message : "Failed to download report")
+    } finally {
+      setIsDownloading(false)
     }
   }
 
@@ -142,9 +146,14 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
           <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">Monthly Portfolio Summary</h1>
           <p className="text-slate-600 dark:text-slate-400">{portfolioName}</p>
         </div>
-        <Button onClick={handleDownload}>
+        <LoadingButton
+          onClick={handleDownload}
+          loading={isDownloading}
+          loadingText="Preparing report..."
+          spinnerPlacement="start"
+        >
           <FileDown className="w-4 h-4 mr-2" /> Download PDF
-        </Button>
+        </LoadingButton>
       </div>
 
       <Card>
@@ -164,7 +173,7 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-4">
             <Metric label="YTD Return" value={`${data.metrics.portfolioReturn.toFixed(1)}%`} />
-            <Metric label="Benchmark" value={data.metrics.benchmarkReturn != null ? `${data.metrics.benchmarkReturn.toFixed(1)}%` : "—"} />
+            <Metric label="Benchmark" value={data.metrics.benchmarkReturn != null ? `${data.metrics.benchmarkReturn.toFixed(1)}%` : "N/A"} />
             <Metric label="Volatility" value={`${data.metrics.volatility.toFixed(1)}%`} />
             <Metric label="Sharpe" value={`${data.metrics.sharpeRatio.toFixed(2)}`} />
             <Metric label="Max DD" value={`${data.metrics.maxDrawdown.toFixed(1)}%`} />
@@ -216,9 +225,9 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
                     <td className="py-2 font-medium">{h.ticker}</td>
                     <td className="py-2">{h.weightPct.toFixed(2)}%</td>
                     <td className="py-2">{h.shares.toFixed(2)}</td>
-                    <td className="py-2">{typeof h.price === "number" ? `$${h.price.toFixed(2)}` : "—"}</td>
-                    <td className="py-2">{h.returnSincePurchase != null ? `${h.returnSincePurchase.toFixed(2)}%` : "—"}</td>
-                    <td className="py-2">{h.contributionPct != null ? `${h.contributionPct.toFixed(2)}%` : "—"}</td>
+                    <td className="py-2">{typeof h.price === "number" ? `$${h.price.toFixed(2)}` : "N/A"}</td>
+                    <td className="py-2">{h.returnSincePurchase != null ? `${h.returnSincePurchase.toFixed(2)}%` : "N/A"}</td>
+                    <td className="py-2">{h.contributionPct != null ? `${h.contributionPct.toFixed(2)}%` : "N/A"}</td>
                   </tr>
                 ))}
               </tbody>

@@ -4,6 +4,7 @@ import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase/client"
 import { Button } from "@/components/ui/button"
+import { LoadingButton } from "@/components/ui/loading-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -303,9 +304,15 @@ export function ManualPortfolioForm() {
         <Button variant="outline" onClick={() => router.push("/dashboard")}>
           Cancel
         </Button>
-        <Button onClick={handleSubmit} disabled={isLoading || !portfolioName.trim() || totalWeight === 0}>
-          {isLoading ? "Creating Portfolio..." : "Create Portfolio"}
-        </Button>
+        <LoadingButton
+          onClick={handleSubmit}
+          loading={isLoading}
+          loadingText="Creating portfolio..."
+          spinnerPlacement="start"
+          disabled={!portfolioName.trim() || totalWeight === 0}
+        >
+          Create Portfolio
+        </LoadingButton>
       </div>
     </div>
   )

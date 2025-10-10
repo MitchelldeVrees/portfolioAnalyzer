@@ -2,6 +2,7 @@
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Spinner } from "@/components/ui/spinner"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -83,7 +84,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <Spinner className="mx-auto mb-4 text-blue-600" size="lg" />
           <p className="text-slate-600 dark:text-slate-400">Loading portfolio analysis...</p>
         </div>
       </div>
@@ -133,9 +134,9 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
 
   const diversificationColor = (score?: number) => {
     if (typeof score !== "number") return "text-slate-900 dark:text-slate-100"
-    if (score <= 4) return "text-red-600 dark:text-red-400" // 0–4 → red
-    if (score <= 6.5) return "text-amber-500 dark:text-amber-400" // 4.1–6.5 → yellow/orange
-    return "text-green-600 dark:text-green-400" // >6.5 → green
+    if (score <= 4) return "text-red-600 dark:text-red-400" // 0Ã¢â‚¬â€œ4 Ã¢â€ â€™ red
+    if (score <= 6.5) return "text-amber-500 dark:text-amber-400" // 4.1Ã¢â‚¬â€œ6.5 Ã¢â€ â€™ yellow/orange
+    return "text-green-600 dark:text-green-400" // >6.5 Ã¢â€ â€™ green
   }
 
   const sectorsForChart =
@@ -155,7 +156,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
   const sumAbs = diffs.reduce((acc, s) => acc + Math.abs(s.diff), 0);
   const activeSharePct = Number((0.5 * sumAbs).toFixed(1)); // 0..100
 
-  // Cosine similarity as a rough “match score” (0..100)
+  // Cosine similarity as a rough Ã¢â‚¬Å“match scoreÃ¢â‚¬Â (0..100)
   const dot = sectorsAll.reduce((acc, s) => acc + (s.allocation || 0) * (s.target || 0), 0);
   const normP = Math.sqrt(sectorsAll.reduce((acc, s) => acc + Math.pow(s.allocation || 0, 2), 0));
   const normB = Math.sqrt(sectorsAll.reduce((acc, s) => acc + Math.pow(s.target || 0, 2), 0));
@@ -234,7 +235,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
     </CardContent>
   </Card>
   <TooltipContent className="max-w-md">
-    <p>The Sharpe Ratio measures risk-adjusted return by dividing excess return (over risk-free rate) by total volatility. It's important for comparing investments, showing efficiency per unit of risk—higher values indicate better performance relative to risk. Desired: 1 (good), 0.5-1 (moderate), 0.5 (poor).</p>
+    <p>The Sharpe Ratio measures risk-adjusted return by dividing excess return (over risk-free rate) by total volatility. It's important for comparing investments, showing efficiency per unit of riskÃ¢â‚¬â€higher values indicate better performance relative to risk. Desired: 1 (good), 0.5-1 (moderate), 0.5 (poor).</p>
   </TooltipContent>
 </Tooltip>
 
@@ -351,7 +352,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                     <div>
                       <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark Match</div>
                       <div className="text-2xl font-bold">
-                        {matchScore !== null ? `${matchScore}%` : "—"}
+                        {matchScore !== null ? `${matchScore}%` : "Ã¢â‚¬â€"}
                       </div>
                     </div>
                   </div>
@@ -433,21 +434,21 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                 <div className="space-y-2">
                   <h4 className="font-medium text-slate-900 dark:text-slate-100">Concentration Risk</h4>
                   <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-                    {portfolioData?.risk?.concentration?.level ?? "—"}
+                    {portfolioData?.risk?.concentration?.level ?? "Ã¢â‚¬â€"}
                   </div>
                   <p className="text-sm text-slate-600 dark:text-slate-400">
-                    Largest position: {portfolioData?.risk?.concentration?.largestPositionPct ?? "—"}% of portfolio
+                    Largest position: {portfolioData?.risk?.concentration?.largestPositionPct ?? "Ã¢â‚¬â€"}% of portfolio
                   </p>
                 </div>
 
                 <div className="space-y-2">
                   <h4 className="font-medium text-slate-900 dark:text-slate-100">Diversification Score</h4>
                   <div className={`text-2xl font-bold ${diversificationColor(diversificationScore)}`}>
-                    {typeof diversificationScore === "number" ? diversificationScore : "—"}/10
+                    {typeof diversificationScore === "number" ? diversificationScore : "Ã¢â‚¬â€"}/10
                   </div>
                   <p className="text-sm text-slate-600 dark:text-slate-400">
-                    {portfolioData?.risk?.diversification?.holdings ?? "—"} holdings; top 2 ={" "}
-                    {portfolioData?.risk?.diversification?.top2Pct ?? "—"}%
+                    {portfolioData?.risk?.diversification?.holdings ?? "Ã¢â‚¬â€"} holdings; top 2 ={" "}
+                    {portfolioData?.risk?.diversification?.top2Pct ?? "Ã¢â‚¬â€"}%
                   </p>
                 </div>
 
@@ -456,7 +457,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                   <div className="flex items-baseline justify-between">
                     <div className="text-sm text-slate-600 dark:text-slate-400">Portfolio Beta</div>
                     <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-                      {typeof portfolioBetaSpx === "number" ? portfolioBetaSpx.toFixed(2) : "—"}
+                      {typeof portfolioBetaSpx === "number" ? portfolioBetaSpx.toFixed(2) : "Ã¢â‚¬â€"}
                       <span className="text-base font-medium ml-2">
                         {portfolioData?.risk?.beta?.level ?? ""}
                       </span>

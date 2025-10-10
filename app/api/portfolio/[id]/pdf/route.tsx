@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createServerClient } from "@/lib/supabase/server";
 import { getDailyHistoryAdjClose, toDailyReturns, getFundamentals, getMarketCaps } from "./yahooFinanceUtils";
 import { corr, stddev, harmonicMean, alignByDate } from "./statsUtils";
 import { chartToDataUri } from "./chartUtils";
@@ -8,14 +8,14 @@ import { getSectorForTicker, normSectorName, SECTOR_LEADERS } from "./sectorUtil
 
 export const runtime = "nodejs";
 
-// Server-side Supabase with SERVICE ROLE
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
-
 export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
   try {
+    const supabase = await createServerClient();
+    const { data: auth, error: authError } = await supabase.auth.getUser();
+    if (authError || !auth?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { benchmark = "^GSPC" } = (await request.json().catch(() => ({}))) as { benchmark?: string };
 
     // 1) Get the portfolio + holdings
@@ -28,6 +28,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         )
       `)
       .eq("id", params.id)
+      .eq("user_id", auth.user.id)
       .single();
 
     if (portfolioErr || !portfolio) {
@@ -428,3 +429,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     return NextResponse.json({ error: "Failed to generate PDF" }, { status: 500 });
   }
 }
+
+
+
+

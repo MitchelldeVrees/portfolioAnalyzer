@@ -1,5 +1,6 @@
 // app/api/portfolio/[id]/summary/route.ts
 import { NextResponse } from "next/server"
+import { createServerClient } from "@/lib/supabase/server"
 
 type DataResponse = {
   holdings: Array<{
@@ -51,6 +52,23 @@ function isNumber(v: any): v is number {
 
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   try {
+    const supabase = await createServerClient();
+    const { data: auth, error: authError } = await supabase.auth.getUser();
+    if (authError || !auth?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { data: ownsPortfolio, error: ownershipError } = await supabase
+      .from("portfolios")
+      .select("id")
+      .eq("id", params.id)
+      .eq("user_id", auth.user.id)
+      .single();
+
+    if (ownershipError || !ownsPortfolio) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+
     const url = new URL(req.url)
     const origin = `${url.protocol}//${url.host}`
     const benchmark = url.searchParams.get("benchmark") || "^GSPC"
@@ -254,3 +272,6 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     return NextResponse.json({ error: "Unexpected error" }, { status: 500 })
   }
 }
+
+
+
