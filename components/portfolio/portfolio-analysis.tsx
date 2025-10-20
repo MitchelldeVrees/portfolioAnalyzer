@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { ArrowLeft, Edit3, TrendingUp, TrendingDown, Minus, FileText } from "lucide-react"
+import { ArrowLeft, Edit3, TrendingUp, TrendingDown, Minus, FileText, RefreshCcw } from "lucide-react"
 import Link from "next/link"
 import { formatDistanceToNow } from "date-fns"
 import { PerformanceChart } from "./performance-chart"
@@ -15,7 +15,7 @@ import { AllocationChart } from "./allocation-chart"
 import { HoldingsAnalysis } from "./holdings-analysis"
 import { NewsResearch } from "./news-research"
 import { PortfolioSummaryReport } from "./portfolio-summary-report"
-import { useEffect, useState } from "react"
+import { useEffect, useState, useRef } from "react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 interface PortfolioHolding {
   id: string
@@ -36,20 +36,26 @@ interface Portfolio {
 
 interface PortfolioAnalysisProps {
   portfolio: Portfolio
+  initialAnalysis?: any | null
+  initialHoldings?: { holdings: any[]; meta: any } | null
 }
 
-export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
-  const [portfolioData, setPortfolioData] = useState<any>(null)
+export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHoldings = null }: PortfolioAnalysisProps) {
+  const [portfolioData, setPortfolioData] = useState<any>(initialAnalysis)
   const [benchmark, setBenchmark] = useState("^GSPC")
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(!initialAnalysis)
   const [error, setError] = useState<string | null>(null)
-
+  const [dataRefreshToken, setDataRefreshToken] = useState(0)
+  const skipInitialFetchRef = useRef(!!initialAnalysis)
+  const [refreshingData, setRefreshingData] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    async function fetchPortfolioData() {
+    async function fetchPortfolioData(silent: boolean) {
       try {
-        setLoading(true)
+        if (!silent) setLoading(true)
+        setError(null)
         const response = await fetch(`/api/portfolio/${portfolio.id}/data?benchmark=${encodeURIComponent(benchmark)}`)
         if (!response.ok) throw new Error("Failed to fetch portfolio data")
         const data = await response.json()
@@ -57,14 +63,65 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : "Failed to load data")
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled && !silent) setLoading(false)
       }
     }
-    fetchPortfolioData()
+
+    const hasExistingData = !!portfolioData
+    const silent = (skipInitialFetchRef.current && dataRefreshToken === 0) || hasExistingData
+    skipInitialFetchRef.current = false
+    void fetchPortfolioData(silent)
+
     return () => {
       cancelled = true
     }
-  }, [portfolio.id, benchmark])
+  }, [portfolio.id, benchmark, dataRefreshToken])
+
+  const handleRefreshData = async () => {
+    setRefreshError(null)
+    setRefreshingData(true)
+    try {
+      const payload = JSON.stringify({ benchmark })
+
+      const holdingsResponse = await fetch(`/api/portfolio/${portfolio.id}/holdings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+      })
+      if (!holdingsResponse.ok) {
+        const errorBody = await holdingsResponse.json().catch(() => null)
+        const message = errorBody?.error || `Failed to refresh holdings (${holdingsResponse.status})`
+        throw new Error(message)
+      }
+
+      const analysisResponse = await fetch(`/api/portfolio/${portfolio.id}/data`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+      })
+      if (!analysisResponse.ok) {
+        const errorBody = await analysisResponse.json().catch(() => null)
+        const message = errorBody?.error || `Failed to refresh analysis (${analysisResponse.status})`
+        throw new Error(message)
+      }
+
+      setDataRefreshToken((token) => token + 1)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to refresh portfolio data"
+      setRefreshError(message)
+    } finally {
+      setRefreshingData(false)
+    }
+  }
+
+
+
+  useEffect(() => {
+    if (initialAnalysis) {
+      setPortfolioData(initialAnalysis)
+      setLoading(false)
+    }
+  }, [initialAnalysis])
 
   const sortinoRatio: number = portfolioData?.metrics?.sortinoRatio ?? 0;
 
@@ -134,9 +191,9 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
 
   const diversificationColor = (score?: number) => {
     if (typeof score !== "number") return "text-slate-900 dark:text-slate-100"
-    if (score <= 4) return "text-red-600 dark:text-red-400" // 0Ã¢â‚¬â€œ4 Ã¢â€ â€™ red
-    if (score <= 6.5) return "text-amber-500 dark:text-amber-400" // 4.1Ã¢â‚¬â€œ6.5 Ã¢â€ â€™ yellow/orange
-    return "text-green-600 dark:text-green-400" // >6.5 Ã¢â€ â€™ green
+    if (score <= 4) return "text-red-600 dark:text-red-400" // 0---Ã…â€œ4 --Ã‚Â -Ã¢â€žÂ¢ red
+    if (score <= 6.5) return "text-amber-500 dark:text-amber-400" // 4.1---Ã…â€œ6.5 --Ã‚Â -Ã¢â€žÂ¢ yellow/orange
+    return "text-green-600 dark:text-green-400" // >6.5 --Ã‚Â -Ã¢â€žÂ¢ green
   }
 
   const sectorsForChart =
@@ -156,7 +213,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
   const sumAbs = diffs.reduce((acc, s) => acc + Math.abs(s.diff), 0);
   const activeSharePct = Number((0.5 * sumAbs).toFixed(1)); // 0..100
 
-  // Cosine similarity as a rough Ã¢â‚¬Å“match scoreÃ¢â‚¬Â (0..100)
+  // Cosine similarity as a rough match score (0..100)
   const dot = sectorsAll.reduce((acc, s) => acc + (s.allocation || 0) * (s.target || 0), 0);
   const normP = Math.sqrt(sectorsAll.reduce((acc, s) => acc + Math.pow(s.allocation || 0, 2), 0));
   const normB = Math.sqrt(sectorsAll.reduce((acc, s) => acc + Math.pow(s.target || 0, 2), 0));
@@ -187,28 +244,45 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark</div>
-          <Select value={benchmark} onValueChange={(v) => setBenchmark(v)}>
-            <SelectTrigger className="w-44">
-              <SelectValue placeholder="Select" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="^GSPC">S&amp;P 500 (^GSPC)</SelectItem>
-              <SelectItem value="^NDX">NASDAQ 100 (^NDX)</SelectItem>
-              <SelectItem value="URTH">MSCI World (URTH)</SelectItem>
-              <SelectItem value="VT">Global (VT)</SelectItem>
-              <SelectItem value="VEA">Developed ex-US (VEA)</SelectItem>
-              <SelectItem value="EEM">Emerging (EEM)</SelectItem>
-            </SelectContent>
-          </Select>
-
-          <Button variant="outline" asChild>
-            <Link href={`/dashboard/portfolio/${portfolio.id}/edit`}>
-              <Edit3 className="w-4 h-4 mr-2" />
-              Edit Portfolio
-            </Link>
-          </Button>
+        <div className="flex flex-col items-end gap-2">
+          <div className="flex items-center gap-3">
+            <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark</div>
+            <Select value={benchmark} onValueChange={(v) => setBenchmark(v)}>
+              <SelectTrigger className="w-44">
+                <SelectValue placeholder="Select" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="^GSPC">S&amp;P 500 (^GSPC)</SelectItem>
+                <SelectItem value="^NDX">NASDAQ 100 (^NDX)</SelectItem>
+                <SelectItem value="URTH">MSCI World (URTH)</SelectItem>
+                <SelectItem value="VT">Global (VT)</SelectItem>
+                <SelectItem value="VEA">Developed ex-US (VEA)</SelectItem>
+                <SelectItem value="EEM">Emerging (EEM)</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button
+              onClick={handleRefreshData}
+              variant="default"
+              disabled={refreshingData}
+            >
+              <RefreshCcw className={`w-4 h-4 mr-2 ${refreshingData ? "animate-spin" : ""}`} />
+              {refreshingData ? "Refreshing..." : "Refresh Data"}
+            </Button>
+            <Button variant="outline" asChild>
+              <Link href={`/dashboard/portfolio/${portfolio.id}/edit`}>
+                <Edit3 className="w-4 h-4 mr-2" />
+                Edit Portfolio
+              </Link>
+            </Button>
+          </div>
+          {refreshError && (
+            <p className="text-sm text-red-600 dark:text-red-400">{refreshError}</p>
+          )}
+          {portfolioData?.meta?.refreshedAt && (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Last refreshed {formatDistanceToNow(new Date(portfolioData.meta.refreshedAt), { addSuffix: true })}
+            </p>
+          )}
         </div>
       </div>
 
@@ -235,7 +309,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
     </CardContent>
   </Card>
   <TooltipContent className="max-w-md">
-    <p>The Sharpe Ratio measures risk-adjusted return by dividing excess return (over risk-free rate) by total volatility. It's important for comparing investments, showing efficiency per unit of riskÃ¢â‚¬â€higher values indicate better performance relative to risk. Desired: 1 (good), 0.5-1 (moderate), 0.5 (poor).</p>
+    <p>The Sharpe Ratio measures risk-adjusted return by dividing excess return (over risk-free rate) by total volatility. It's important for comparing investments, showing efficiency per unit of risk-higher values indicate better performance relative to risk. Desired: 1 (good), 0.5-1 (moderate), 0.5 (poor).</p>
   </TooltipContent>
 </Tooltip>
 
@@ -352,7 +426,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                     <div>
                       <div className="text-sm text-slate-600 dark:text-slate-400">Benchmark Match</div>
                       <div className="text-2xl font-bold">
-                        {matchScore !== null ? `${matchScore}%` : "Ã¢â‚¬â€"}
+                        {matchScore !== null ? `${matchScore}%` : "-"}
                       </div>
                     </div>
                   </div>
@@ -434,21 +508,21 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                 <div className="space-y-2">
                   <h4 className="font-medium text-slate-900 dark:text-slate-100">Concentration Risk</h4>
                   <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-                    {portfolioData?.risk?.concentration?.level ?? "Ã¢â‚¬â€"}
+                    {portfolioData?.risk?.concentration?.level ?? "-"}
                   </div>
                   <p className="text-sm text-slate-600 dark:text-slate-400">
-                    Largest position: {portfolioData?.risk?.concentration?.largestPositionPct ?? "Ã¢â‚¬â€"}% of portfolio
+                    Largest position: {portfolioData?.risk?.concentration?.largestPositionPct ?? "-"}% of portfolio
                   </p>
                 </div>
 
                 <div className="space-y-2">
                   <h4 className="font-medium text-slate-900 dark:text-slate-100">Diversification Score</h4>
                   <div className={`text-2xl font-bold ${diversificationColor(diversificationScore)}`}>
-                    {typeof diversificationScore === "number" ? diversificationScore : "Ã¢â‚¬â€"}/10
+                    {typeof diversificationScore === "number" ? diversificationScore : "-"}/10
                   </div>
                   <p className="text-sm text-slate-600 dark:text-slate-400">
-                    {portfolioData?.risk?.diversification?.holdings ?? "Ã¢â‚¬â€"} holdings; top 2 ={" "}
-                    {portfolioData?.risk?.diversification?.top2Pct ?? "Ã¢â‚¬â€"}%
+                    {portfolioData?.risk?.diversification?.holdings ?? "-"} holdings; top 2 ={" "}
+                    {portfolioData?.risk?.diversification?.top2Pct ?? "-"}%
                   </p>
                 </div>
 
@@ -457,7 +531,7 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
                   <div className="flex items-baseline justify-between">
                     <div className="text-sm text-slate-600 dark:text-slate-400">Portfolio Beta</div>
                     <div className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-                      {typeof portfolioBetaSpx === "number" ? portfolioBetaSpx.toFixed(2) : "Ã¢â‚¬â€"}
+                      {typeof portfolioBetaSpx === "number" ? portfolioBetaSpx.toFixed(2) : "-"}
                       <span className="text-base font-medium ml-2">
                         {portfolioData?.risk?.beta?.level ?? ""}
                       </span>
@@ -496,17 +570,46 @@ export function PortfolioAnalysis({ portfolio }: PortfolioAnalysisProps) {
         </TabsContent>
 
         <TabsContent value="holdings">
-          <HoldingsAnalysis portfolioId={portfolio.id} />
+          <HoldingsAnalysis portfolioId={portfolio.id} benchmark={benchmark} refreshToken={dataRefreshToken} initialData={initialHoldings} />
         </TabsContent>
 
         <TabsContent value="research">
-          <NewsResearch portfolioId={portfolio.id} holdings={portfolio.portfolio_holdings} />
+          <NewsResearch portfolioId={portfolio.id} />
         </TabsContent>
 
         <TabsContent value="report">
           <PortfolioSummaryReport portfolio={portfolio} benchmark={benchmark} />
         </TabsContent>
       </Tabs>
+      {refreshingData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm">
+          <Card className="w-[320px] shadow-xl">
+            <CardContent className="py-8 text-center space-y-4">
+              <Spinner className="mx-auto text-blue-600" size="lg" />
+              <div className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                Refreshing portfolio data
+              </div>
+              <p className="text-sm text-slate-600 dark:text-slate-400">
+                We are fetching the latest market data. This might take a moment.
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </div>
   )
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+

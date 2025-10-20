@@ -12,6 +12,35 @@ type Holding = {
   purchase_price?: number;
 };
 
+type PortfolioAnalysisSnapshot = {
+  holdings: any[];
+  performance: Array<{ date: string; portfolio: number; benchmark?: number }>;
+  performanceMeta: { hasBenchmark: boolean; benchmark: string };
+  sectors: Array<{ sector: string; allocation: number; target: number; color?: string }>;
+  metrics: {
+    historicalPortfolioReturn: number;
+    benchmarkReturn: number | null;
+    volatility: number;
+    sharpeRatio: number;
+    sortinoRatio: number;
+    maxDrawdown: number;
+    beta: number;
+    totalValue: number;
+    portfolioBetaSpx: number | null;
+    spxBeta: number;
+    betaDiff: number | null;
+  };
+  risk: {
+    concentration: Record<string, any>;
+    diversification: Record<string, any>;
+    beta: { level: string; value: number };
+  };
+  meta: {
+    benchmark: string;
+    refreshedAt: string;
+  };
+};
+
 const DEFAULT_BENCH = "^GSPC"; // Yahoo supports ^GSPC, ^NDX, etc.
 
 // ---------- utils & helpers ----------
@@ -328,146 +357,185 @@ async function fetchYahooBeta(symbol: string): Promise<number | null> { try { co
 async function computePortfolioBetaSpx(symbols: string[], weights: number[]) { const betas = await Promise.all(symbols.map(fetchYahooBeta)); let bsum = 0, wsum = 0; for (let i = 0; i < symbols.length; i++) { const b = betas[i]; const w = weights[i]; if (typeof b === "number" && Number.isFinite(w)) { bsum += b * w; wsum += w; } } return wsum > 0 ? bsum / wsum : null; }
 
 // ---------- route ----------
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
-  try {
-    const supabase = await createServerClient();
+const ANALYSIS_SNAPSHOT_TABLE = "portfolio_analysis_snapshots";
 
-    const { data: auth, error: authError } = await supabase.auth.getUser();
-    if (authError || !auth?.user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-    const url = new URL(request.url);
-    const userBenchmark = url.searchParams.get("benchmark") || DEFAULT_BENCH;
+async function loadPortfolioWithHoldings(supabase: any, portfolioId: string, userId: string) {
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select(`*, portfolio_holdings (*)`)
+    .eq("id", portfolioId)
+    .eq("user_id", userId)
+    .single();
 
-    // 1) Load portfolio
-    const { data: portfolio, error } = await supabase
-      .from("portfolios")
-      .select(`*, portfolio_holdings (*)`)
-      .eq("id", params.id)
-      .eq("user_id", auth.user.id)
-      .single();
+  if (error || !data) return null;
+  return data;
+}
 
-    if (error || !portfolio) {
-      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
-    }
+async function loadCachedAnalysisSnapshot(
+  supabase: any,
+  portfolioId: string,
+  benchmark: string,
+): Promise<PortfolioAnalysisSnapshot | null> {
+  const { data, error } = await supabase
+    .from(ANALYSIS_SNAPSHOT_TABLE)
+    .select("payload")
+    .eq("portfolio_id", portfolioId)
+    .eq("benchmark", benchmark)
+    .maybeSingle();
 
-    const holdings: Holding[] = portfolio.portfolio_holdings || [];
-    if (!holdings.length) {
-      return NextResponse.json({
-        holdings: [],
-        performance: [],
-        performanceMeta: { hasBenchmark: false, benchmark: userBenchmark },
-        sectors: [],
-        metrics: {
-          // Removed portfolioReturn; added sortinoRatio with default 0
-          historicalPortfolioReturn: 0,
-          benchmarkReturn: null,
-          volatility: 0,
-          sharpeRatio: 0,
-          sortinoRatio: 0, // NEW
-          maxDrawdown: 0,
-          beta: 0,
-          totalValue: 0,
-          portfolioBetaSpx: null,
-          spxBeta: 1.0,
-          betaDiff: null,
-        },
-        risk: {
-          concentration: { level: "Low", largestPositionPct: 0, top2Pct: 0, hhi: 0, effectiveHoldings: 0 },
-          diversification: { score: 0, holdings: 0, top2Pct: 0, sectorHHI: 0, effectiveHoldings: 0 },
-          beta: { level: "Medium", value: 1.0 },
-        },
-      });
-    }
+  if (error) {
+    console.warn(`loadCachedAnalysisSnapshot error for ${portfolioId}/${benchmark}:`, error.message);
+    return null;
+  }
 
-    // 2) Quotes in ONE call
-    const symbols = holdings.map((h) => h.ticker);
-    const quotesMap = await fetchQuotesBatch(symbols);
-    await warmSectorCache(symbols); // async, don't await
+  const payload = data?.payload as PortfolioAnalysisSnapshot | undefined;
+  return payload ?? null;
+}
 
-    // NEW: Fetch dynamic risk-free rate from Yahoo (^IRX for 13-week T-Bill)
-    let riskFree = 0.05; // Fallback
-    try {
-      const irxQuote = await yahooFinance.quote('^IRX');
-      riskFree = (irxQuote.regularMarketPrice || 4.04) / 100; // Divide by 100 to get decimal rate
-    } catch (e) {
-      console.warn('[risk-free] Failed to fetch ^IRX, using fallback 0.05:', (e as Error)?.message || e);
-    }
+async function persistAnalysisSnapshot(
+  supabase: any,
+  portfolioId: string,
+  benchmark: string,
+  payload: PortfolioAnalysisSnapshot,
+  userId: string,
+) {
+  const storedAt = new Date().toISOString();
+  const refreshedAt = payload?.meta?.refreshedAt ?? storedAt;
 
-    // 3) Build holdingsData
-    const holdingsData = holdings.map((h) => {
-      const q = quotesMap[h.ticker] || { price: 100, change: 0, changePercent: 0 };
-      const qty = h.shares ?? (h.weight * 10000) / q.price; // like your old logic
-      const totalValue = q.price * qty;
-      return { ...h, ...q, totalValue, shares: qty };
-    });
-
-    const totalValue = holdingsData.reduce((s, h) => s + h.totalValue, 0);
-    const weights = holdingsData.map((h) => (totalValue > 0 ? h.totalValue / totalValue : 0));
-    const dailyPortfolioReturn = holdingsData.reduce((sum, h) => sum + (h.changePercent * h.totalValue) / (totalValue || 1), 0); // Kept for potential use, but not in metrics
-
-    // 3b) Fetch benchmark sector targets once per request
-    const benchTargets = (await fetchBenchmarkSectorTargets(userBenchmark)) ?? fallbackTargets();
-
-    // 4) Sector allocation (portfolio vs benchmark targets)
-    const sectorAgg: Record<string, number> = {};
-    for (const h of holdingsData) {
-      const sector = getSectorForTicker(h.ticker);
-      sectorAgg[sector] = (sectorAgg[sector] || 0) + (h.totalValue / (totalValue || 1)) * 100;
-    }
-    const sectors = Object.entries(sectorAgg).map(([sector, allocation]) => ({
-      sector,
-      allocation: Number(allocation.toFixed(1)),
-      target: Number((benchTargets[sector] ?? 0).toFixed(1)),
-      color: getSectorColor(sector),
-    }));
-
-    // Ensure benchmark sectors that user has 0% in still show (nice for charts)
-    for (const [sector, tgt] of Object.entries(benchTargets)) {
-      if (!sectors.find((s) => s.sector === sector)) {
-        sectors.push({ sector, allocation: 0, target: Number(tgt.toFixed(1)), color: getSectorColor(sector) });
-      }
-    }
-
-    // UPDATED: Use YTD months
-    const now = new Date();
-    const monthsYTD = now.getMonth() + 1; // Jan = 1, Sep = 9
-
-    // 5) History for performance
-    let benchHistory: { date: string; close: number }[] = [];
-    try {
-      benchHistory = await fetchHistoryMonthlyClose(userBenchmark, monthsYTD);
-    } catch (e) {
-      benchHistory = [];
-      console.warn(`[history] benchmark ${userBenchmark} failed:`, (e as Error)?.message || e);
-    }
-
-    const perTicker = await Promise.all(
-      holdings.map(async (h) => {
-        try {
-          const pts = await fetchHistoryMonthlyClose(h.ticker, monthsYTD);
-          return { ticker: h.ticker, points: pts, ok: true as const };
-        } catch (e) {
-          console.warn(`[history] ${h.ticker} failed:`, (e as Error)?.message || e);
-          return { ticker: h.ticker, points: [], ok: false as const };
-        }
-      }),
+  const { error } = await supabase
+    .from(ANALYSIS_SNAPSHOT_TABLE)
+    .upsert(
+      {
+        portfolio_id: portfolioId,
+        benchmark,
+        payload,
+        refreshed_at: refreshedAt,
+        refreshed_by: userId,
+        updated_at: storedAt,
+      },
+      { onConflict: "portfolio_id,benchmark" },
     );
 
-    // Check if sufficient history available (no purchase_price required)
-    const hasPortfolioHistory = perTicker.filter(x => x.ok && x.points.length > 1).length / holdings.length > 0.5; // >50% holdings have data, and at least 2 points
-    const showBenchmark = benchHistory.length > 1 && hasPortfolioHistory;
+  if (error) {
+    throw error;
+  }
+}
 
-    let performance: { date: string; portfolio: number; benchmark?: number }[] = [];
-    let vol = 0, beta = 0, mdd = 0, sharpe = 0, sortino = 0, benchRet: number | null = null; // Added sortino
-    let historicalPortfolioReturn: number = 0;
+async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): Promise<PortfolioAnalysisSnapshot> {
+  const holdings: Holding[] = Array.isArray(portfolio?.portfolio_holdings) ? portfolio.portfolio_holdings : [];
+  const refreshedAt = new Date().toISOString();
 
-    if (showBenchmark) {
-      const byTicker = Object.fromEntries(perTicker.map((x) => [x.ticker, x.points]));
-      const dates = benchHistory.map((p) => p.date);
+  if (!holdings.length) {
+    return {
+      holdings: [],
+      performance: [],
+      performanceMeta: { hasBenchmark: false, benchmark: userBenchmark },
+      sectors: [],
+      metrics: {
+        historicalPortfolioReturn: 0,
+        benchmarkReturn: null,
+        volatility: 0,
+        sharpeRatio: 0,
+        sortinoRatio: 0,
+        maxDrawdown: 0,
+        beta: 0,
+        totalValue: 0,
+        portfolioBetaSpx: null,
+        spxBeta: 1.0,
+        betaDiff: null,
+      },
+      risk: {
+        concentration: { level: "Low", largestPositionPct: 0, top2Pct: 0, hhi: 0, effectiveHoldings: 0 },
+        diversification: { score: 0, holdings: 0, top2Pct: 0, sectorHHI: 0, effectiveHoldings: 0 },
+        beta: { level: "Medium", value: 1.0 },
+      },
+      meta: {
+        benchmark: userBenchmark,
+        refreshedAt,
+      },
+    };
+  }
 
-      const portfolioRaw = dates.map((_, i) => {
-        let acc = 0, wsum = 0;
+  const symbols = holdings.map((h) => h.ticker);
+  const quotesMap = await fetchQuotesBatch(symbols);
+  await warmSectorCache(symbols); // async, don't await
+
+  let riskFree = 0.05;
+  try {
+    const irxQuote = await yahooFinance.quote('^IRX');
+    riskFree = (irxQuote.regularMarketPrice || 4.04) / 100;
+  } catch (e) {
+    console.warn('[risk-free] Failed to fetch ^IRX, using fallback 0.05:', (e as Error)?.message || e);
+  }
+
+  const holdingsData = holdings.map((h) => {
+    const q = quotesMap[h.ticker] || { price: 100, change: 0, changePercent: 0 };
+    const qty = h.shares ?? (h.weight * 10000) / q.price;
+    const totalValue = q.price * qty;
+    return { ...h, ...q, totalValue, shares: qty };
+  });
+
+  const totalValue = holdingsData.reduce((s, h) => s + h.totalValue, 0);
+  const weights = holdingsData.map((h) => (totalValue > 0 ? h.totalValue / totalValue : 0));
+  const dailyPortfolioReturn = holdingsData.reduce((sum, h) => sum + (h.changePercent * h.totalValue) / (totalValue || 1), 0);
+  const benchTargets = (await fetchBenchmarkSectorTargets(userBenchmark)) ?? fallbackTargets();
+
+  const sectorAgg: Record<string, number> = {};
+  for (const h of holdingsData) {
+    const sector = getSectorForTicker(h.ticker);
+    sectorAgg[sector] = (sectorAgg[sector] || 0) + (h.totalValue / (totalValue || 1)) * 100;
+  }
+  const sectors = Object.entries(sectorAgg).map(([sector, allocation]) => ({
+    sector,
+    allocation: Number(allocation.toFixed(1)),
+    target: Number((benchTargets[sector] ?? 0).toFixed(1)),
+    color: getSectorColor(sector),
+  }));
+
+  for (const [sector, tgt] of Object.entries(benchTargets)) {
+    if (!sectors.find((s) => s.sector === sector)) {
+      sectors.push({ sector, allocation: 0, target: Number(tgt.toFixed(1)), color: getSectorColor(sector) });
+    }
+  }
+
+  const now = new Date();
+  const monthsYTD = now.getMonth() + 1;
+
+  let benchHistory: { date: string; close: number }[] = [];
+  try {
+    benchHistory = await fetchHistoryMonthlyClose(userBenchmark, monthsYTD);
+  } catch (e) {
+    benchHistory = [];
+    console.warn(`[history] benchmark ${userBenchmark} failed:`, (e as Error)?.message || e);
+  }
+
+  const perTicker = await Promise.all(
+    holdings.map(async (h) => {
+      try {
+        const pts = await fetchHistoryMonthlyClose(h.ticker, monthsYTD);
+        return { ticker: h.ticker, points: pts, ok: true as const };
+      } catch (e) {
+        console.warn(`[history] ${h.ticker} failed:`, (e as Error)?.message || e);
+        return { ticker: h.ticker, points: [], ok: false as const };
+      }
+    }),
+  );
+
+  const hasPortfolioHistory = perTicker.filter(x => x.ok && x.points.length > 1).length / holdings.length > 0.5;
+  const showBenchmark = benchHistory.length > 1 && hasPortfolioHistory;
+
+  let performance: { date: string; portfolio: number; benchmark?: number }[] = [];
+  let vol = 0, beta = 0, mdd = 0, sharpe = 0, sortino = 0, benchRet: number | null = null;
+  let historicalPortfolioReturn = 0;
+
+  if (showBenchmark) {
+    const byTicker = Object.fromEntries(perTicker.map((x) => [x.ticker, x.points]));
+    const dates = benchHistory.map((p) => p.date);
+
+    const portfolioRaw = dates
+      .map((_, i) => {
+        let acc = 0;
+        let wsum = 0;
         for (let k = 0; k < holdingsData.length; k++) {
           const t = holdingsData[k].ticker;
           const series = byTicker[t];
@@ -477,93 +545,161 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
           wsum += weights[k];
         }
         return wsum > 0 ? acc / wsum : NaN;
-      }).filter((v) => Number.isFinite(v)) as number[];
+      })
+      .filter((v) => Number.isFinite(v)) as number[];
 
-      const benchmarkRaw = benchHistory.map((p) => p.close);
+    const benchmarkRaw = benchHistory.map((p) => p.close);
 
-      if (portfolioRaw.length > 1 && benchmarkRaw.length > 1) {
-        const baseP = portfolioRaw[0];
-        const baseB = benchmarkRaw[0];
-        const normP = portfolioRaw.map((v) => (v / baseP) * 100);
-        const normB = benchmarkRaw.map((v) => (v / baseB) * 100);
+    if (portfolioRaw.length > 1 && benchmarkRaw.length > 1) {
+      const baseP = portfolioRaw[0];
+      const baseB = benchmarkRaw[0];
+      const normP = portfolioRaw.map((v) => (v / baseP) * 100);
+      const normB = benchmarkRaw.map((v) => (v / baseB) * 100);
 
-        performance = dates.map((date, i) => ({
-          date,
-          portfolio: Number(normP[i]?.toFixed(2)),
-          benchmark: Number(normB[i]?.toFixed(2)),
-        }));
+      performance = dates.map((date, i) => ({
+        date,
+        portfolio: Number(normP[i]?.toFixed(2)),
+        benchmark: Number(normB[i]?.toFixed(2)),
+      }));
 
-        vol = annualizedVolatility(normP.map((v) => v / 100)) * 100;
-        beta = estimateBeta(normP, normB);
-        mdd = maxDrawdown(normP.map((v) => v / 100)) * 100;
+      vol = annualizedVolatility(normP.map((v) => v / 100)) * 100;
+      beta = estimateBeta(normP, normB);
+      mdd = maxDrawdown(normP.map((v) => v / 100)) * 100;
 
-        const retsMonthly = pctReturns(normP);
-        const avgMonthly = mean(retsMonthly);
-        const annualRet = avgMonthly * 12;
-        const volAnnual = vol / 100;
-        sharpe = volAnnual > 0 ? (annualRet - riskFree) / volAnnual : 0;
+      const retsMonthly = pctReturns(normP);
+      const avgMonthly = mean(retsMonthly);
+      const annualRet = avgMonthly * 12;
+      const volAnnual = vol / 100;
+      sharpe = volAnnual > 0 ? (annualRet - riskFree) / volAnnual : 0;
 
-        // NEW: Compute Sortino ratio
-        const mar = 0; // Minimum acceptable return (monthly); can set to riskFree / 12 if preferred
-        const downsideDevs = retsMonthly.map(r => Math.pow(Math.min(0, r - mar), 2));
-        const downsideVar = mean(downsideDevs);
-        const downsideDevMonthly = Math.sqrt(downsideVar);
-        const downsideDevAnnual = downsideDevMonthly * Math.sqrt(12);
-        sortino = downsideDevAnnual > 0 ? (annualRet - riskFree) / downsideDevAnnual : 0;
+      const mar = 0;
+      const downsideDevs = retsMonthly.map((r) => Math.pow(Math.min(0, r - mar), 2));
+      const downsideVar = mean(downsideDevs);
+      const downsideDevMonthly = Math.sqrt(downsideVar);
+      const downsideDevAnnual = downsideDevMonthly * Math.sqrt(12);
+      sortino = downsideDevAnnual > 0 ? (annualRet - riskFree) / downsideDevAnnual : 0;
 
-        benchRet = Number((((normB.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
-        historicalPortfolioReturn = Number((((normP.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
-      } else {
-        console.warn(`Insufficient history data for benchmark ${userBenchmark}`);
+      benchRet = Number((((normB.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
+      historicalPortfolioReturn = Number((((normP.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
+    } else {
+      console.warn(`Insufficient history data for benchmark ${userBenchmark}`);
+    }
+  }
+
+  const portfolioBetaSpxRaw = await computePortfolioBetaSpx(
+    holdingsData.map((h) => h.ticker),
+    weights,
+  );
+  const portfolioBetaSpx = typeof portfolioBetaSpxRaw === "number" ? Number(portfolioBetaSpxRaw.toFixed(2)) : null;
+  const spxBeta = 1.0;
+  const betaDiff = typeof portfolioBetaSpx === "number" ? Number((portfolioBetaSpx - spxBeta).toFixed(2)) : null;
+
+  const concentration = computeConcentration(weights);
+  const diversification = computeDiversification(weights, holdingsData.map((h) => h.ticker));
+
+  const betaForRisk = showBenchmark ? beta : typeof portfolioBetaSpx === "number" ? portfolioBetaSpx : 1;
+  const betaLevel = betaForRisk < 0.8 ? "Low" : betaForRisk <= 1.2 ? "Medium" : "High";
+
+  return {
+    holdings: holdingsData,
+    performance,
+    performanceMeta: { hasBenchmark: showBenchmark, benchmark: userBenchmark },
+    sectors: sectors.sort((a, b) => b.allocation - a.allocation),
+    metrics: {
+      historicalPortfolioReturn,
+      benchmarkReturn: benchRet,
+      volatility: Number(vol.toFixed(1)),
+      sharpeRatio: Number(sharpe.toFixed(2)),
+      sortinoRatio: Number(sortino.toFixed(2)),
+      maxDrawdown: Number(mdd.toFixed(1)),
+      beta: Number(beta.toFixed(2)),
+      totalValue,
+      portfolioBetaSpx,
+      spxBeta,
+      betaDiff,
+    },
+    risk: {
+      concentration,
+      diversification,
+      beta: { level: betaLevel, value: Number(betaForRisk.toFixed(2)) },
+    },
+    meta: {
+      benchmark: userBenchmark,
+      refreshedAt,
+    },
+  };
+}
+
+export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const supabase = await createServerClient();
+    const { data: auth, error: authError } = await supabase.auth.getUser();
+    if (authError || !auth?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const userBenchmark = url.searchParams.get("benchmark") || DEFAULT_BENCH;
+    const forceRefresh = url.searchParams.get("forceRefresh") === "true";
+
+    const portfolio = await loadPortfolioWithHoldings(supabase, params.id, auth.user.id);
+    if (!portfolio) {
+      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    }
+
+    if (!forceRefresh) {
+      const cached = await loadCachedAnalysisSnapshot(supabase, params.id, userBenchmark);
+      if (cached) {
+        return NextResponse.json(cached);
       }
     }
 
-    // 6) Portfolio beta vs S&P 500 (unchanged)
-    const portfolioBetaSpxRaw = await computePortfolioBetaSpx(
-      holdingsData.map(h => h.ticker),
-      weights
-    );
-    const portfolioBetaSpx = (typeof portfolioBetaSpxRaw === "number")
-      ? Number(portfolioBetaSpxRaw.toFixed(2))
-      : null;
-    const spxBeta = 1.00;
-    const betaDiff = (typeof portfolioBetaSpx === "number")
-      ? Number((portfolioBetaSpx - spxBeta).toFixed(2))
-      : null;
+    const snapshot = await computeAnalysisSnapshot(portfolio, userBenchmark);
 
-    const concentration = computeConcentration(weights);
-    const diversification = computeDiversification(weights, holdingsData.map(h => h.ticker));
+    try {
+      await persistAnalysisSnapshot(supabase, params.id, userBenchmark, snapshot, auth.user.id);
+    } catch (persistError) {
+      console.error("Failed to persist analysis snapshot:", persistError);
+    }
 
-    const betaForRisk = showBenchmark ? beta : (typeof portfolioBetaSpx === "number" ? portfolioBetaSpx : 1);
-    const betaLevel = betaForRisk < 0.8 ? "Low" : betaForRisk <= 1.2 ? "Medium" : "High";
-
-    return NextResponse.json({
-      holdings: holdingsData,
-      performance: performance,
-      performanceMeta: { hasBenchmark: showBenchmark, benchmark: userBenchmark },
-      sectors: sectors.sort((a, b) => b.allocation - a.allocation),
-      metrics: {
-        // Replaced portfolioReturn (daily) with sharpeRatio and sortinoRatio as primary metrics
-        historicalPortfolioReturn, // Retained for context
-        benchmarkReturn: benchRet,
-        volatility: Number(vol.toFixed(1)),
-        sharpeRatio: Number(sharpe.toFixed(2)),
-        sortinoRatio: Number(sortino.toFixed(2)), // NEW
-        maxDrawdown: Number(mdd.toFixed(1)),
-        beta: Number(beta.toFixed(2)),
-        totalValue,
-        portfolioBetaSpx,
-        spxBeta,
-        betaDiff,
-      },
-      risk: {
-        concentration,
-        diversification,
-        beta: { level: betaLevel, value: Number(betaForRisk.toFixed(2)) },
-      },
-    });
+    return NextResponse.json(snapshot);
   } catch (err) {
     console.error("Error fetching portfolio data:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
+
+export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const supabase = await createServerClient();
+    const { data: auth, error: authError } = await supabase.auth.getUser();
+    if (authError || !auth?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    let body: any = null;
+    try {
+      body = await request.json();
+    } catch {
+      body = null;
+    }
+
+    const url = new URL(request.url);
+    const queryBenchmark = url.searchParams.get("benchmark");
+    const bodyBenchmark = typeof body?.benchmark === "string" ? body.benchmark.trim() : "";
+    const benchmark = bodyBenchmark || queryBenchmark || DEFAULT_BENCH;
+
+    const portfolio = await loadPortfolioWithHoldings(supabase, params.id, auth.user.id);
+    if (!portfolio) {
+      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    }
+
+    const snapshot = await computeAnalysisSnapshot(portfolio, benchmark);
+    await persistAnalysisSnapshot(supabase, params.id, benchmark, snapshot, auth.user.id);
+
+    return NextResponse.json({ status: "ok", snapshot });
+  } catch (err) {
+    console.error("Error refreshing portfolio data:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

@@ -36,7 +36,7 @@ export function PortfolioUploadForm() {
   const [parsedData, setParsedData] = useState<ParsedHolding[] | null>(null)
   const [showPreview, setShowPreview] = useState(false)
   const [headers, setHeaders] = useState<string[]>([]) // Original case headers for display
-  const [mappings, setMappings] = useState({
+  const [mappings, setMappings] = useState<ColumnMappings>({
     ticker: "",
     weight: "",
     shares: "",
@@ -90,13 +90,13 @@ export function PortfolioUploadForm() {
     }
   }
 
-  const parseCSVContent = (content: string, mappings: typeof mappings): ParsedHolding[] => {
+  const parseCSVContent = (content: string, columnMap: ColumnMappings): ParsedHolding[] => {
     const lines = content.trim().split("\n")
     const rawHeaders = lines[0].split(",").map((h) => h.trim())
     const lowerHeaders = rawHeaders.map((h) => h.toLowerCase())
 
     // Find column indices based on mappings
-    const tickerIndex = lowerHeaders.findIndex((h) => h === mappings.ticker.toLowerCase())
+    const tickerIndex = lowerHeaders.findIndex((h) => h === columnMap.ticker.toLowerCase())
     const weightIndex = mappings.weight
       ? lowerHeaders.findIndex((h) => h === mappings.weight.toLowerCase())
       : -1
@@ -302,16 +302,16 @@ export function PortfolioUploadForm() {
     }
   }
 
-  const updateMapping = (field: keyof typeof mappings, value: string) => {
+  const updateMapping = (field: keyof ColumnMappings, value: string) => {
     setMappings((prev) => ({ ...prev, [field]: value }))
   }
 
-  const getOptionalValue = (field: keyof typeof mappings) => {
+  const getOptionalValue = (field: keyof ColumnMappings) => {
     const value = mappings[field]
     return value === "" ? "none" : value
   }
 
-  const handleOptionalChange = (field: keyof typeof mappings, value: string) => {
+  const handleOptionalChange = (field: keyof ColumnMappings, value: string) => {
     updateMapping(field, value === "none" ? "" : value)
   }
 

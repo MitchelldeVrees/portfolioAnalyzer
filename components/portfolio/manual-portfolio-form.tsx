@@ -45,7 +45,7 @@ export function ManualPortfolioForm() {
     }
   }
 
-  const updateHolding = (id: string, field: keyof Holding, value: string | number) => {
+  const updateHolding = (id: string, field: keyof Holding, value: string | number | undefined) => {
     setHoldings(holdings.map((h) => (h.id === id ? { ...h, [field]: value } : h)))
   }
 
@@ -317,3 +317,4 @@ export function ManualPortfolioForm() {
     </div>
   )
 }
+

@@ -1,13 +1,13 @@
 // /app/(whatever)/holding-analysis.tsx
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, useRef } from "react"
+import { formatDistanceToNow } from "date-fns"
 import { motion, AnimatePresence } from "framer-motion"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { TrendingUp, TrendingDown, Minus, Info } from "lucide-react"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -34,29 +34,33 @@ type HoldingRow = {
   beta12m: number | null
   // NEW robust risk fields from the API:
   riskScore?: number | null
-  riskBucket?: "Low" | "Medium" | "High" | "—"
+  riskBucket?: "Low" | "Medium" | "High" | "-"
   riskComponents?: RiskComponent[]
 }
 
 interface HoldingsAnalysisProps {
   portfolioId: string
+  benchmark: string
+  refreshToken: number
+  initialData?: { holdings: HoldingRow[]; meta: any } | null
 }
 
-export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
-  const [data, setData] = useState<{ holdings: HoldingRow[]; meta: any } | null>(null)
-  const [loading, setLoading] = useState(true)
+export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initialData = null }: HoldingsAnalysisProps) {
+  const [data, setData] = useState<{ holdings: HoldingRow[]; meta: any } | null>(initialData)
+  const [loading, setLoading] = useState(!initialData)
   const [error, setError] = useState<string | null>(null)
-  const [benchmark, setBenchmark] = useState("^GSPC")
-
+  const skipInitialFetchRef = useRef(!!initialData)
   // modal state
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<HoldingRow | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    async function run() {
+
+    async function run(silent: boolean) {
       try {
-        setLoading(true)
+        if (!silent) setLoading(true)
+        setError(null)
         const res = await fetch(`/api/portfolio/${portfolioId}/holdings?benchmark=${encodeURIComponent(benchmark)}`)
         if (!res.ok) throw new Error(`Failed to load holdings (${res.status})`)
         const json = await res.json()
@@ -64,14 +68,33 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load holdings")
       } finally {
-        if (!cancelled) setLoading(false)
+        if (!cancelled && !silent) setLoading(false)
       }
     }
-    run()
+
+    const hasExisting = !!data
+    const silent = skipInitialFetchRef.current || hasExisting
+    if (silent && skipInitialFetchRef.current) {
+      skipInitialFetchRef.current = false
+      void run(true)
+    } else if (silent) {
+      void run(true)
+    } else {
+      void run(false)
+    }
+
     return () => {
       cancelled = true
     }
-  }, [portfolioId, benchmark])
+  }, [portfolioId, benchmark, refreshToken])
+
+
+  useEffect(() => {
+    if (initialData) {
+      setData(initialData)
+      setLoading(false)
+    }
+  }, [initialData])
 
   const anyCostBasis = !!data?.meta?.anyCostBasis
   const holdings = data?.holdings || []
@@ -91,7 +114,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
   // Use composite risk score buckets
   const getRiskLevel = (riskScore?: number | null) => {
     const v = typeof riskScore === "number" ? riskScore : null
-    if (v === null) return { level: "—", color: "bg-slate-400" }
+    if (v === null) return { level: "-", color: "bg-slate-400" }
     if (v < 33) return { level: "Low", color: "bg-green-500" }
     if (v < 66) return { level: "Medium", color: "bg-amber-500" }
     return { level: "High", color: "bg-red-500" }
@@ -123,10 +146,10 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
       <Card>
         <CardHeader>
           <CardTitle>Individual Holdings Analysis</CardTitle>
-          <CardDescription>Loading holdings…</CardDescription>
+          <CardDescription>Loading holdings...</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="h-24 flex items-center text-slate-500 dark:text-slate-400">Fetching data…</div>
+          <div className="h-24 flex items-center text-slate-500 dark:text-slate-400">Fetching data...</div>
         </CardContent>
       </Card>
     )
@@ -154,8 +177,13 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
             <CardDescription>
               {anyCostBasis
                 ? `Performance, contribution, and risk by holding (vs ${data?.meta?.benchmark})`
-                : "No purchase data found — showing current allocation and risk only"}
+                : "No purchase data found - showing current allocation and risk only"}
             </CardDescription>
+            {data?.meta?.refreshedAt && (
+              <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                Refreshed {formatDistanceToNow(new Date(data.meta.refreshedAt), { addSuffix: true })}
+              </p>
+            )}
           </div>
           
         </CardHeader>
@@ -215,7 +243,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                                 </span>
                               </div>
                             ) : (
-                              <span className="text-slate-400">—</span>
+                              <span className="text-slate-400">-</span>
                             )}
                           </td>
                           <td className="p-3">
@@ -225,7 +253,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                                 {h.contributionPct.toFixed(1)}%
                               </div>
                             ) : (
-                              <span className="text-slate-400">—</span>
+                              <span className="text-slate-400">-</span>
                             )}
                           </td>
                         </>
@@ -233,12 +261,12 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
 
                       <td className="p-3">
                         <div className="text-slate-900 dark:text-slate-100">
-                          {typeof h.volatility12m === "number" ? `${h.volatility12m.toFixed(1)}%` : "—"}
+                          {typeof h.volatility12m === "number" ? `${h.volatility12m.toFixed(1)}%` : "-"}
                         </div>
                       </td>
                       <td className="p-3">
                         <div className="text-slate-900 dark:text-slate-100">
-                          {typeof h.beta12m === "number" ? h.beta12m.toFixed(2) : "—"}
+                          {typeof h.beta12m === "number" ? h.beta12m.toFixed(2) : "-"}
                         </div>
                       </td>
 
@@ -255,7 +283,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                             <Info className="w-3.5 h-3.5 ml-1 opacity-70" />
                           </Button>
                         ) : (
-                          <span className="text-slate-400">—</span>
+                          <span className="text-slate-400">-</span>
                         )}
                       </td>
 
@@ -318,7 +346,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                 <DialogHeader className="px-6 pt-6">
                   <DialogTitle className="flex items-center justify-between">
                     <span>
-                      {selected.ticker} — Risk score{" "}
+                      {selected.ticker} - Risk score{" "}
                       <span className="font-mono">{selected.riskScore}</span>
                     </span>
                     <Badge variant="outline" className="ml-3">
@@ -335,10 +363,10 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                   {/* Formula card */}
                   <div className="mt-4 rounded-2xl border p-4 bg-slate-50 dark:bg-slate-900/40">
                     <div className="text-sm text-slate-600 dark:text-slate-400 mb-2">
-                      Formula (weights × scores → 0–100):
+                      Formula (weights x scores -> 0-100):
                     </div>
                     <div className="font-mono text-sm">
-                      riskScore = Σ (component.score × component.weight)
+                      riskScore = Sigma (component.score x component.weight)
                     </div>
                   </div>
 
@@ -376,7 +404,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                               <div className="text-xs md:text-right text-slate-600 dark:text-slate-400">
                                 raw value:&nbsp;
                                 <span className="font-mono text-slate-900 dark:text-slate-100">
-                                  {c.value ?? "—"}
+                                  {c.value ?? "-"}
                                 </span>
                               </div>
                             </div>
@@ -389,7 +417,7 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
                   <div className="mt-6 rounded-2xl border p-4 bg-slate-50 dark:bg-slate-900/40">
                     <div className="flex items-center justify-between">
                       <div className="text-sm text-slate-600 dark:text-slate-400">Total</div>
-                      <div className="font-bold text-lg font-mono">{selected.riskScore ?? "—"}</div>
+                      <div className="font-bold text-lg font-mono">{selected.riskScore ?? "-"}</div>
                     </div>
                   </div>
                 </ScrollArea>
@@ -401,3 +429,5 @@ export function HoldingsAnalysis({ portfolioId }: HoldingsAnalysisProps) {
     </>
   )
 }
+
+

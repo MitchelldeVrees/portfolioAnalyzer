@@ -1,6 +1,6 @@
 "use client"
 
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts"
+import { PieChart, Pie, Cell, ResponsiveContainer } from "recharts"
 
 interface AllocationData {
   sector: string
@@ -43,7 +43,7 @@ export function AllocationChart({ data }: AllocationChartProps) {
               outerRadius="80%"
               dataKey="allocation"
               // Keep labels tidy; they render inside the donut
-              label={({ sector, allocation }) => `${sector}: ${Number(allocation).toFixed(1)}%`}
+              label={(entry: any) => `${entry.sector ?? entry.name}: ${Number(entry.allocation ?? entry.value).toFixed(1)}%`}
               labelLine={false}
               isAnimationActive
             >
@@ -76,3 +76,4 @@ export function AllocationChart({ data }: AllocationChartProps) {
     </div>
   )
 }
+

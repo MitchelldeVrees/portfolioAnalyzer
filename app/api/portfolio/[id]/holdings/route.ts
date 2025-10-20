@@ -10,7 +10,39 @@ type Holding = {
   weight: number;
   shares?: number;
   purchase_price?: number | null;
-  
+};
+
+type HoldingsSnapshotPayload = {
+  holdings: Array<{
+    id: string;
+    ticker: string;
+    sector: string;
+    price: number;
+    weightPct: number;
+    shares: number;
+    hasCostBasis: boolean;
+    returnSincePurchase: number | null;
+    contributionPct: number | null;
+    volatility12m: number | null;
+    beta12m: number | null;
+    riskScore?: number | null;
+    riskBucket?: string | null;
+    riskComponents?: Array<{
+      key: string;
+      label: string;
+      score: number;
+      weight: number;
+      value: number | null;
+    }>;
+  }>;
+  meta: {
+    benchmark: string;
+    anyCostBasis: boolean;
+    totalValue: number;
+    avgBetaWeighted: number;
+    riskModel: string;
+    refreshedAt: string;
+  };
 };
 
 const DEFAULT_BENCH = "^GSPC"; // Yahoo/our layer supports this
@@ -373,197 +405,323 @@ function computeRiskScore(x: RiskInputs) {
 }
 
 // ------------ route handler ------------
+
+const SNAPSHOT_TABLE = "portfolio_holdings_snapshots";
+
+async function loadPortfolioWithHoldings(supabase: any, portfolioId: string, userId: string) {
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select(`*, portfolio_holdings (*)`)
+    .eq("id", portfolioId)
+    .eq("user_id", userId)
+    .single();
+  if (error || !data) return null;
+  return data;
+}
+
+async function loadCachedSnapshot(
+  supabase: any,
+  portfolioId: string,
+  benchmark: string,
+): Promise<HoldingsSnapshotPayload | null> {
+  const { data, error } = await supabase
+    .from(SNAPSHOT_TABLE)
+    .select("payload")
+    .eq("portfolio_id", portfolioId)
+    .eq("benchmark", benchmark)
+    .maybeSingle();
+
+  if (error) {
+    console.warn(`loadCachedSnapshot error for ${portfolioId}/${benchmark}:`, error.message);
+    return null;
+  }
+
+  return (data?.payload as HoldingsSnapshotPayload) ?? null;
+}
+
+async function persistHoldingsSnapshot(
+  supabase: any,
+  portfolioId: string,
+  benchmark: string,
+  payload: HoldingsSnapshotPayload,
+  userId: string,
+) {
+  const storedAt = new Date().toISOString();
+  const refreshedAt = payload?.meta?.refreshedAt ?? storedAt;
+
+  const { error } = await supabase
+    .from(SNAPSHOT_TABLE)
+    .upsert(
+      {
+        portfolio_id: portfolioId,
+        benchmark,
+        payload,
+        refreshed_at: refreshedAt,
+        refreshed_by: userId,
+        updated_at: storedAt,
+      },
+      { onConflict: "portfolio_id,benchmark" },
+    );
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function computeHoldingsSnapshot(
+  holdings: Holding[],
+  benchmark: string,
+): Promise<HoldingsSnapshotPayload> {
+  const sanitized = Array.isArray(holdings) ? holdings : [];
+  const normalizedBenchmark = benchmark || DEFAULT_BENCH;
+  const refreshedAt = new Date().toISOString();
+
+  if (!sanitized.length) {
+    return {
+      holdings: [],
+      meta: {
+        benchmark: normalizedBenchmark,
+        anyCostBasis: false,
+        totalValue: 0,
+        avgBetaWeighted: 0,
+        riskModel: "v1.0",
+        refreshedAt,
+      },
+    };
+  }
+
+  const symbols = sanitized.map((h) => h.ticker);
+  const quotesMap = (await fetchQuotesBatch(symbols)) || {};
+
+  const temp = sanitized.map((h) => {
+    const quote = quotesMap[h.ticker] || { price: 100 };
+    const price = typeof quote.price === "number" && Number.isFinite(quote.price) ? quote.price : 100;
+    const sharesRaw =
+      typeof h.shares === "number" && Number.isFinite(h.shares)
+        ? h.shares
+        : ((h.weight || 0) * 10000) / price;
+    const shares = Number.isFinite(sharesRaw) ? sharesRaw : 0;
+    const totalValue = price * shares;
+    const hasCostBasis = typeof h.purchase_price === "number" && Number.isFinite(h.purchase_price);
+    const returnSincePurchase =
+      hasCostBasis && h.purchase_price
+        ? ((price - h.purchase_price) / h.purchase_price) * 100
+        : null;
+
+    return {
+      ...h,
+      price,
+      shares,
+      totalValue,
+      hasCostBasis,
+      returnSincePurchase,
+      sector: getSectorForTicker(h.ticker),
+    };
+  });
+
+  const rawPortfolioValue = temp.reduce((sum, x) => sum + x.totalValue, 0);
+  const denominator = rawPortfolioValue || 1;
+  const withWeights = temp.map((x) => ({
+    ...x,
+    weightPct: (x.totalValue / denominator) * 100,
+  }));
+
+  const enriched = withWeights.map((x) => ({
+    ...x,
+    contributionPct:
+      x.returnSincePurchase != null ? (x.returnSincePurchase * x.weightPct) / 100 : null,
+  }));
+
+  const anyCostBasis = enriched.some((x) => x.hasCostBasis);
+
+  let benchHistory: { date: string; close: number }[] = [];
+  try {
+    benchHistory = await fetchHistoryMonthlyClose(normalizedBenchmark, 12);
+  } catch {
+    benchHistory = [];
+  }
+
+  const benchIndex = benchHistory.map((p) => p.close);
+  const benchBase = benchIndex[0] || 100;
+  const benchNorm = benchIndex.map((v) => (v / benchBase) * 100);
+
+  const historyEntries = await Promise.all(
+    symbols.map(async (sym) => {
+      try {
+        const pts = await fetchHistoryMonthlyClose(sym, 12);
+        return [sym, pts] as const;
+      } catch {
+        return [sym, []] as const;
+      }
+    }),
+  );
+  const historyMap = Object.fromEntries(historyEntries);
+
+  const riskInputsEntries = await Promise.all(
+    symbols.map(async (sym) => {
+      const [hist, fundamentals] = await Promise.all([fetchHistRisk(sym), fetchFundamentals(sym)]);
+      return [
+        sym,
+        {
+          vol12mPct: hist.vol12mPct,
+          mdd12mPct: hist.mdd12mPct,
+          beta: fundamentals.beta,
+          debtToEquity: fundamentals.debtToEquity,
+          interestCoverage: fundamentals.interestCoverage,
+          trailingPE: fundamentals.trailingPE,
+          ps: fundamentals.ps,
+          peg: fundamentals.peg,
+          fcfYieldPct: fundamentals.fcfYieldPct,
+          avgDollarVol: fundamentals.avgDollarVol,
+          shortPctFloat: fundamentals.shortPctFloat,
+          shortRatio: fundamentals.shortRatio,
+          daysToEarnings: fundamentals.daysToEarnings,
+        },
+      ] as const;
+    }),
+  );
+  const riskInputsBySymbol = Object.fromEntries(riskInputsEntries);
+
+  const final = enriched.map((h) => {
+    const pts = (historyMap[h.ticker] as { date: string; close: number }[]) || [];
+
+    let fallbackVol12m: number | null = null;
+    let fallbackBeta12m: number | null = null;
+    if (pts.length >= 6) {
+      const sIdx = pts.map((p) => p.close);
+      const base = sIdx[0] || 100;
+      const norm = sIdx.map((v) => (v / base) * 100);
+
+      fallbackVol12m = Number((annualizedVolatilityFromIndex(norm) * 100).toFixed(1));
+
+      if (benchNorm.length === norm.length && benchNorm.length >= 6) {
+        fallbackBeta12m = Number(estimateBeta(norm, benchNorm).toFixed(2));
+      }
+    }
+
+    const inputs = riskInputsBySymbol[h.ticker];
+
+    const volatility12m =
+      (inputs?.vol12mPct != null ? inputs.vol12mPct : null) ?? fallbackVol12m;
+
+    const beta12m =
+      (typeof inputs?.beta === "number" ? Number(inputs.beta.toFixed(2)) : null) ??
+      (typeof fallbackBeta12m === "number" ? fallbackBeta12m : null);
+
+    const { riskScore, bucket, components } = computeRiskScore({
+      ...inputs,
+      weightPct: h.weightPct,
+    });
+
+    return {
+      id: h.id,
+      ticker: h.ticker,
+      sector: h.sector,
+      price: Number(h.price.toFixed(2)),
+      weightPct: Number(h.weightPct.toFixed(2)),
+      shares: Number(h.shares.toFixed(4)),
+      hasCostBasis: h.hasCostBasis,
+      returnSincePurchase:
+        h.returnSincePurchase != null ? Number(h.returnSincePurchase.toFixed(2)) : null,
+      contributionPct:
+        h.contributionPct != null ? Number(h.contributionPct.toFixed(2)) : null,
+      volatility12m,
+      beta12m,
+      riskScore,
+      riskBucket: bucket,
+      riskComponents: components,
+    };
+  });
+
+  const avgBetaWeighted = (() => {
+    const valid = final.filter((f) => typeof f.beta12m === "number");
+    const sum = valid.reduce((s, x) => s + (x.beta12m as number) * (x.weightPct / 100), 0);
+    return Number(sum.toFixed(2));
+  })();
+
+  return {
+    holdings: final.sort((a, b) => b.weightPct - a.weightPct),
+    meta: {
+      benchmark: normalizedBenchmark,
+      anyCostBasis,
+      totalValue: Number(rawPortfolioValue.toFixed(2)),
+      avgBetaWeighted,
+      riskModel: "v1.0",
+      refreshedAt,
+    },
+  };
+}
+
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   try {
     const supabase = await createServerClient();
-
     const { data: auth, error: authError } = await supabase.auth.getUser();
     if (authError || !auth?.user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
+
     const url = new URL(request.url);
     const benchmark = url.searchParams.get("benchmark") || DEFAULT_BENCH;
+    const forceRefresh = url.searchParams.get("forceRefresh") === "true";
 
-    // 1) Load portfolio + holdings
-    const { data: portfolio, error } = await supabase
-      .from("portfolios")
-      .select(`*, portfolio_holdings (*)`)
-      .eq("id", params.id)
-      .eq("user_id", auth.user.id)
-      .single();
-
-    if (error || !portfolio) {
+    const portfolio = await loadPortfolioWithHoldings(supabase, params.id, auth.user.id);
+    if (!portfolio) {
       return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
     }
 
-    const holdings: Holding[] = portfolio.portfolio_holdings || [];
-    if (!holdings.length) {
-      return NextResponse.json({
-        holdings: [],
-        meta: { benchmark, anyCostBasis: false, totalValue: 0, avgBetaWeighted: 0 },
-      });
+    if (!forceRefresh) {
+      const cached = await loadCachedSnapshot(supabase, params.id, benchmark);
+      if (cached) {
+        return NextResponse.json(cached);
+      }
     }
 
-    // 2) Quotes (batch)
-    const symbols = holdings.map(h => h.ticker);
-    const quotesMap = await fetchQuotesBatch(symbols);
+    const snapshot = await computeHoldingsSnapshot(portfolio.portfolio_holdings || [], benchmark);
 
-    // 3) Values/weights
-    const temp = holdings.map(h => {
-      const q = quotesMap[h.ticker] || { price: 100, change: 0, changePercent: 0 };
-      const shares = h.shares ?? (h.weight * 10000) / q.price; // fallback
-      const totalValue = q.price * shares;
-      const hasCostBasis = !!(h.purchase_price);
-      const retSincePurchase = hasCostBasis && h.purchase_price
-        ? ((q.price - h.purchase_price) / h.purchase_price) * 100
-        : null;
-      return {
-        ...h,
-        price: q.price,
-        changePercent: q.changePercent,
-        shares,
-        totalValue,
-        hasCostBasis,
-        returnSincePurchase: retSincePurchase,
-        sector: getSectorForTicker(h.ticker),
-      };
-    });
-
-    const portfolioTotalValue = temp.reduce((s, x) => s + x.totalValue, 0) || 1;
-    const withWeights = temp.map(x => ({ ...x, weightPct: (x.totalValue / portfolioTotalValue) * 100 }));
-
-    const enriched = withWeights.map(x => ({
-      ...x,
-      contributionPct: x.returnSincePurchase != null ? (x.returnSincePurchase * x.weightPct) / 100 : null,
-    }));
-    const anyCostBasis = enriched.some(x => x.hasCostBasis);
-
-    // 4) Monthly series for fallback beta/vol
-    let benchHistory: { date: string; close: number }[] = [];
     try {
-      benchHistory = await fetchHistoryMonthlyClose(benchmark, 12);
-    } catch {
-      benchHistory = [];
+      await persistHoldingsSnapshot(supabase, params.id, benchmark, snapshot, auth.user.id);
+    } catch (persistError) {
+      console.error("Failed to persist holdings snapshot:", persistError);
     }
-    const benchIndex = benchHistory.map(p => p.close);
-    const benchBase = benchIndex[0] || 100;
-    const benchNorm = benchIndex.map(v => (v / benchBase) * 100);
 
-    const historyByTicker = await Promise.all(
-      symbols.map(async sym => {
-        try {
-          const pts = await fetchHistoryMonthlyClose(sym, 12);
-          return [sym, pts] as const;
-        } catch {
-          return [sym, []] as const;
-        }
-      }),
-    );
-    const historyMap = Object.fromEntries(historyByTicker);
-
-    // 5) Fetch risk inputs per symbol (daily vol/MDD + fundamentals)
-    const riskInputsBySymbol = Object.fromEntries(
-  await Promise.all(
-    symbols.map(async (sym) => {
-      const [hist, f] = await Promise.all([fetchHistRisk(sym), fetchFundamentals(sym)]);
-      return [sym, {
-        vol12mPct: hist.vol12mPct,
-        mdd12mPct: hist.mdd12mPct,
-        beta: f.beta,
-        debtToEquity: f.debtToEquity,
-        interestCoverage: f.interestCoverage,
-        trailingPE: f.trailingPE,
-        ps: f.ps,
-        peg: f.peg,
-        fcfYieldPct: f.fcfYieldPct,
-        avgDollarVol: f.avgDollarVol,
-        shortPctFloat: f.shortPctFloat,
-        shortRatio: f.shortRatio,
-        daysToEarnings: f.daysToEarnings,
-      }] as const;
-    })
-  )
-);
-
-    // 6) Build final rows (prefer Yahoo-daily computations; fallback to monthly)
-    // 6) Build final rows
-const final = enriched.map(h => {
-  const pts = (historyMap[h.ticker] as { date: string; close: number }[]) || [];
-
-  // Fallback computations (monthly) if missing
-  let fallbackVol12m: number | null = null;
-  let fallbackBeta12m: number | null = null;
-  if (pts.length >= 6) {
-    const sIdx = pts.map(p => p.close);
-    const base = sIdx[0] || 100;
-    const norm = sIdx.map(v => (v / base) * 100);
-
-    fallbackVol12m = Number((annualizedVolatilityFromIndex(norm) * 100).toFixed(1));
-
-    if (benchNorm.length === norm.length && benchNorm.length >= 6) {
-      fallbackBeta12m = Number(estimateBeta(norm, benchNorm).toFixed(2));
-    }
-  }
-
-  // --- FETCHED inputs (daily Yahoo + fundamentals) ---
-  const inputs = riskInputsBySymbol[h.ticker];
-
-  // --- FIX: define these before returning the object ---
-  const volatility12m: number | null =
-    (inputs?.vol12mPct != null ? inputs.vol12mPct : null) ?? fallbackVol12m;
-
-  const beta12m: number | null =
-    (typeof inputs?.beta === "number" ? Number(inputs.beta.toFixed(2)) : null) ??
-    (typeof fallbackBeta12m === "number" ? fallbackBeta12m : null);
-
-  // Compute risk score with position size (weightPct)
-  const { riskScore, bucket, components } = computeRiskScore({
-    ...inputs,
-    weightPct: h.weightPct,
-  });
-
-  return {
-    id: h.id,
-    ticker: h.ticker,
-    sector: h.sector,
-    price: Number(h.price.toFixed(2)),
-    weightPct: Number(h.weightPct.toFixed(2)),
-    shares: Number(h.shares.toFixed(4)),
-    hasCostBasis: h.hasCostBasis,
-    returnSincePurchase: h.returnSincePurchase != null ? Number(h.returnSincePurchase.toFixed(2)) : null,
-    contributionPct: h.contributionPct != null ? Number(h.contributionPct.toFixed(2)) : null,
-
-    // now defined identifiers:
-    volatility12m,
-    beta12m,
-
-    riskScore,
-    riskBucket: bucket,
-    riskComponents: components,
-  };
-});
-
-
-    const avgBetaWeighted = (() => {
-      const valid = final.filter(f => typeof f.beta12m === "number");
-      const sum = valid.reduce((s, x) => s + (x.beta12m as number) * (x.weightPct / 100), 0);
-      return Number(sum.toFixed(2));
-    })();
-
-    return NextResponse.json({
-      holdings: final.sort((a, b) => b.weightPct - a.weightPct),
-      meta: {
-        benchmark,
-        anyCostBasis,
-        totalValue: portfolioTotalValue,
-        avgBetaWeighted,
-        riskModel: "v1.0", // optional version tag
-      },
-    });
+    return NextResponse.json(snapshot);
   } catch (err) {
     console.error("Error fetching holdings data:", err);
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
 
+export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+  try {
+    const supabase = await createServerClient();
+    const { data: auth, error: authError } = await supabase.auth.getUser();
+    if (authError || !auth?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
+    let body: any = null;
+    try {
+      body = await request.json();
+    } catch {
+      body = null;
+    }
+
+    const url = new URL(request.url);
+    const queryBenchmark = url.searchParams.get("benchmark");
+    const bodyBenchmark = typeof body?.benchmark === "string" ? body.benchmark.trim() : "";
+    const benchmark = bodyBenchmark || queryBenchmark || DEFAULT_BENCH;
+
+    const portfolio = await loadPortfolioWithHoldings(supabase, params.id, auth.user.id);
+    if (!portfolio) {
+      return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
+    }
+
+    const snapshot = await computeHoldingsSnapshot(portfolio.portfolio_holdings || [], benchmark);
+    await persistHoldingsSnapshot(supabase, params.id, benchmark, snapshot, auth.user.id);
+
+    return NextResponse.json({ status: "ok", snapshot });
+  } catch (err) {
+    console.error("Error refreshing holdings data:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  }
+}
