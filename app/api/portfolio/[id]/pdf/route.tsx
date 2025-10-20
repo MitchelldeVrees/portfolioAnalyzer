@@ -116,23 +116,26 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     }));
 
     const piePalette = [
-      "#2563eb", "#16a34a", "#f59e0b", "#ef4444", "#8b5cf6",
-      "#06b6d4", "#84cc16", "#f97316", "#dc2626", "#0ea5e9",
-      "#a855f7", "#22c55e", "#eab308", "#fb7185", "#10b981",
-      "#64748b",
+      "#93c5fd", "#86efac", "#fcd34d", "#fca5a5", "#c4b5fd",
+      "#67e8f9", "#bef264", "#fdba74", "#fda4af", "#7dd3fc",
+      "#d8b4fe", "#86efac", "#fde047", "#f9a8d4", "#99f6e4",
+      "#94a3b8",
     ];
     const colors = normSectors.map((_, i) => piePalette[i % piePalette.length]);
 
     let allocationChartUri = "";
     if (normSectors.length) {
+      // Filter out sectors with 0 allocation
+      const nonZeroSectors = normSectors.filter(s => s.alloc > 0);
       allocationChartUri = await chartToDataUri(
         {
           type: "pie",
           data: {
-            labels: normSectors.map((s) => s.label),
+            labels: nonZeroSectors.map((s) => s.label),
             datasets: [
               {
-                data: normSectors.map((s) => Number(s.alloc.toFixed(2))),
+                data: nonZeroSectors.map((s) => Number(s.alloc.toFixed(2))),
+                
                 backgroundColor: colors,
                 borderColor: "#ffffff",
                 borderWidth: 1,
@@ -337,6 +340,9 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         datasets: [{
           label: "Contribution (pp)",
           data: topContrib.map(x => Number(x.contrib.toFixed(2))),
+          backgroundColor: '#93c5fd',
+          borderColor: '#60a5fa',
+          borderWidth: 1
         }]
       },
       options: {
@@ -365,7 +371,13 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       type: "bar",
       data: {
         labels: yieldBars.map(r => r.ticker),
-        datasets: [{ label: "Dividend Yield (%)", data: yieldBars.map(r => Number(r.dividendYieldPct!.toFixed(2))) }]
+        datasets: [{ 
+          label: "Dividend Yield (%)", 
+          data: yieldBars.map(r => Number(r.dividendYieldPct!.toFixed(2))),
+          backgroundColor: '#86efac',
+          borderColor: '#4ade80',
+          borderWidth: 1
+        }]
       },
       options: {
         plugins: { title: { display: true, text: "Dividend Yield by Holding (Top 12)" }, legend: { display: false } },
