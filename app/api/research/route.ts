@@ -90,6 +90,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "OPENAI_API_KEY is not configured" }, { status: 500 })
   }
 
+  
   try {
     const body = await request.json()
     const { tickers: tickersInput, portfolioData, newsLookbackDays } = body;
