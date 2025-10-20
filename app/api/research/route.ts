@@ -59,6 +59,10 @@ const DEFAULT_LOOKBACK = 7
 const MAX_NEWS_PER_TICKER = 3
 const MAX_TICKERS_FOR_FUNDAMENTALS = 8
 
+function isoDateOnly(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
 export async function POST(request: NextRequest) {
   const cookieStore = cookies()
 
@@ -88,9 +92,39 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    const tickersInput: unknown = body?.tickers
+    const { tickers: tickersInput, portfolioData, newsLookbackDays } = body;
+    
     if (!Array.isArray(tickersInput) || tickersInput.length === 0) {
       return NextResponse.json({ error: "tickers array is required" }, { status: 400 })
+    }
+
+    const lookback: 7 | 14 = newsLookbackDays === 7 ? 7 : 14; // default 14
+
+    const todayISO = isoDateOnly(new Date());
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - lookback);
+    const cutoffISO = isoDateOnly(cutoff);
+
+    
+    // Allowed domains for higher quality financial news sources
+    const allowedDomains = [
+      "finance.yahoo.com",
+      "yahoo.com",
+      "reuters.com",
+      "bloomberg.com",
+      "wsj.com",
+      "ft.com",
+      "cnbc.com",
+      "marketwatch.com",
+      "barrons.com",
+      "investors.com",
+      "fool.com",
+      "seekingalpha.com",
+      "sec.gov",
+    ];
+
+    function hostnameFromUrl(u: string): string | null {
+      try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return null; }
     }
 
     const tickers = Array.from(
