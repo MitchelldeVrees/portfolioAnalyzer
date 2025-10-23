@@ -10,7 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { Upload, AlertCircle, CheckCircle2 } from "lucide-react"
+import { Upload, AlertCircle, CheckCircle2, HelpCircle, FileText, Settings } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import {
   Select,
@@ -19,13 +19,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-
-interface ParsedHolding {
-  ticker: string
-  weight?: number
-  shares?: number
-  purchasePrice?: number
-}
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Badge } from "@/components/ui/badge"
+import { Separator } from "@/components/ui/separator"
+import { ColumnMappings, BLOOMBERG_FIELD_MAPPINGS, autoMapHeaders, getMappingsByCategory } from "@/lib/bloomberg-mapping"
+import { parseCSVContent, validateHoldings, ParsedHolding } from "@/lib/csv-parser"
 
 export function PortfolioUploadForm() {
   const [file, setFile] = useState<File | null>(null)
@@ -44,6 +42,9 @@ export function PortfolioUploadForm() {
   })
   const [fileContent, setFileContent] = useState<string>("") // Store file content to avoid re-reading
   const [isCSV, setIsCSV] = useState(false)
+  const [parseResult, setParseResult] = useState<{ errors: string[]; warnings: string[] } | null>(null)
+  const [showAdvancedMapping, setShowAdvancedMapping] = useState(false)
+  const [selectedCategory, setSelectedCategory] = useState<string>("all")
 
   const router = useRouter()
   const supabase = createClient()
@@ -52,9 +53,16 @@ export function PortfolioUploadForm() {
     if (fileContent && mappings.ticker && isCSV) {
       setIsLoading(true)
       try {
-        const parsed = parseCSVContent(fileContent, mappings)
-        if (parsed.length > 0) {
-          setParsedData(parsed)
+        const result = parseCSVContent(fileContent, mappings)
+        const validation = validateHoldings(result.holdings)
+        
+        setParseResult({
+          errors: [...result.errors, ...validation.errors],
+          warnings: [...result.warnings, ...validation.warnings]
+        })
+        
+        if (result.holdings.length > 0) {
+          setParsedData(result.holdings)
           setError(null)
         } else {
           setParsedData(null)
@@ -63,11 +71,13 @@ export function PortfolioUploadForm() {
       } catch (err) {
         setParsedData(null)
         setError(err instanceof Error ? err.message : "Failed to parse file")
+        setParseResult({ errors: [err instanceof Error ? err.message : "Failed to parse file"], warnings: [] })
       } finally {
         setIsLoading(false)
       }
     } else if (parsedData && !mappings.ticker) {
       setParsedData(null)
+      setParseResult(null)
     }
   }, [mappings, fileContent, isCSV])
 
@@ -87,65 +97,9 @@ export function PortfolioUploadForm() {
       })
       setFileContent("")
       setIsCSV(false)
+      setParseResult(null)
+      setShowAdvancedMapping(false)
     }
-  }
-
-  const parseCSVContent = (content: string, columnMap: ColumnMappings): ParsedHolding[] => {
-    const lines = content.trim().split("\n")
-    const rawHeaders = lines[0].split(",").map((h) => h.trim())
-    const lowerHeaders = rawHeaders.map((h) => h.toLowerCase())
-
-    // Find column indices based on mappings
-    const tickerIndex = lowerHeaders.findIndex((h) => h === columnMap.ticker.toLowerCase())
-    const weightIndex = mappings.weight
-      ? lowerHeaders.findIndex((h) => h === mappings.weight.toLowerCase())
-      : -1
-    const sharesIndex = mappings.shares
-      ? lowerHeaders.findIndex((h) => h === mappings.shares.toLowerCase())
-      : -1
-    const priceIndex = mappings.purchasePrice
-      ? lowerHeaders.findIndex((h) => h === mappings.purchasePrice.toLowerCase())
-      : -1
-
-    if (tickerIndex === -1) {
-      throw new Error("Ticker column is required. Please select a column for ticker.")
-    }
-
-    const holdings: ParsedHolding[] = []
-
-    for (let i = 1; i < lines.length; i++) {
-      const values = lines[i].split(",").map((v) => v.trim())
-      if (values.length < rawHeaders.length || !values[tickerIndex]) continue
-
-      const holding: ParsedHolding = {
-        ticker: values[tickerIndex].toUpperCase(),
-      }
-
-      if (weightIndex !== -1 && values[weightIndex]) {
-        const weight = Number.parseFloat(values[weightIndex].replace("%", ""))
-        if (!isNaN(weight)) {
-          holding.weight = weight > 1 ? weight / 100 : weight
-        }
-      }
-
-      if (sharesIndex !== -1 && values[sharesIndex]) {
-        const shares = Number.parseFloat(values[sharesIndex])
-        if (!isNaN(shares)) {
-          holding.shares = shares
-        }
-      }
-
-      if (priceIndex !== -1 && values[priceIndex]) {
-        const price = Number.parseFloat(values[priceIndex].replace("$", ""))
-        if (!isNaN(price)) {
-          holding.purchasePrice = price
-        }
-      }
-
-      holdings.push(holding)
-    }
-
-    return holdings
   }
 
   const handleLoadHeaders = async () => {
@@ -158,43 +112,59 @@ export function PortfolioUploadForm() {
       const content = await file.text()
       setFileContent(content)
 
-      let parsed: ParsedHolding[] | undefined
-
       if (file.name.endsWith(".csv") || file.type === "text/csv") {
         const lines = content.trim().split("\n")
         if (lines.length < 1) {
           throw new Error("Empty file.")
         }
-        const rawHeaders = lines[0].split(",").map((h) => h.trim())
+        
+        // Detect delimiter
+        const delimiter = content.includes('\t') ? '\t' : 
+                         content.includes(';') ? ';' : 
+                         content.includes('|') ? '|' : ','
+        
+        const rawHeaders = lines[0].split(delimiter).map((h) => h.trim().replace(/['"]/g, ''))
         setHeaders(rawHeaders)
         setIsCSV(true)
 
-        // Auto-guess mappings based on names
+        // Auto-map headers using Bloomberg field mappings
+        const autoMappings = autoMapHeaders(rawHeaders)
+        
+        // Fallback to basic mappings if auto-mapping fails
         const lowerHeaders = rawHeaders.map((h) => h.toLowerCase())
-        let ticker = ""
-        let weight = ""
-        let purchasePrice = ""
-        let shares = ""
+        let ticker = autoMappings.ticker || ""
+        let weight = autoMappings.weight || ""
+        let purchasePrice = autoMappings.purchasePrice || ""
+        let shares = autoMappings.shares || ""
 
-        const tickerIdx = lowerHeaders.findIndex(
-          (h) => h.includes("ticker") || h.includes("symbol") || h.includes("stock")
-        )
-        if (tickerIdx !== -1) ticker = rawHeaders[tickerIdx]
+        // Enhanced auto-detection
+        if (!ticker) {
+          const tickerIdx = lowerHeaders.findIndex(
+            (h) => h.includes("ticker") || h.includes("symbol") || h.includes("stock")
+          )
+          if (tickerIdx !== -1) ticker = rawHeaders[tickerIdx]
+        }
 
-        const weightIdx = lowerHeaders.findIndex(
-          (h) => h.includes("weight") || h.includes("allocation") || h.includes("percent") || h.includes("percentage")
-        )
-        if (weightIdx !== -1) weight = rawHeaders[weightIdx]
+        if (!weight) {
+          const weightIdx = lowerHeaders.findIndex(
+            (h) => h.includes("weight") || h.includes("allocation") || h.includes("percent") || h.includes("percentage")
+          )
+          if (weightIdx !== -1) weight = rawHeaders[weightIdx]
+        }
 
-        const sharesIdx = lowerHeaders.findIndex(
-          (h) => h.includes("shares") || h.includes("quantity") || h.includes("units") || h.includes("amount")
-        )
-        if (sharesIdx !== -1) shares = rawHeaders[sharesIdx]
+        if (!shares) {
+          const sharesIdx = lowerHeaders.findIndex(
+            (h) => h.includes("shares") || h.includes("quantity") || h.includes("units") || h.includes("amount") || h.includes("position")
+          )
+          if (sharesIdx !== -1) shares = rawHeaders[sharesIdx]
+        }
 
-        const priceIdx = lowerHeaders.findIndex(
-          (h) => h.includes("price") || h.includes("cost") || h.includes("purchase") || h.includes("share price")
-        )
-        if (priceIdx !== -1) purchasePrice = rawHeaders[priceIdx]
+        if (!purchasePrice) {
+          const priceIdx = lowerHeaders.findIndex(
+            (h) => h.includes("price") || h.includes("cost") || h.includes("purchase") || h.includes("share price")
+          )
+          if (priceIdx !== -1) purchasePrice = rawHeaders[priceIdx]
+        }
 
         // Fallback to positions if not set
         if (!ticker && rawHeaders.length >= 1) ticker = rawHeaders[0]
@@ -207,13 +177,14 @@ export function PortfolioUploadForm() {
           weight,
           shares,
           purchasePrice,
+          ...autoMappings
         })
 
         setShowPreview(true)
       } else if (file.name.endsWith(".txt") || file.type === "text/plain") {
         // Simple text parsing - assume each line is ticker percentage share_price shares
         const lines = content.trim().split("\n")
-        parsed = lines
+        const parsed = lines
           .map((line) => {
             const parts = line.trim().split(/[,\s]+/)
             const holding: ParsedHolding = {
@@ -281,13 +252,34 @@ export function PortfolioUploadForm() {
 
       if (portfolioError) throw portfolioError
 
-      // Insert holdings
+      // Insert holdings with enhanced Bloomberg fields
       const holdings = parsedData.map((holding) => ({
         portfolio_id: portfolio.id,
         ticker: holding.ticker,
         weight: holding.weight || 0,
         shares: holding.shares || null,
         purchase_price: holding.purchasePrice || null,
+        // Bloomberg-specific fields
+        security_name: holding.securityName || null,
+        isin: holding.isin || null,
+        cusip: holding.cusip || null,
+        sedol: holding.sedol || null,
+        market_value: holding.marketValue || null,
+        cost_value: holding.costValue || null,
+        unrealized_pl: holding.unrealizedPl || null,
+        realized_pl: holding.realizedPl || null,
+        total_pl: holding.totalPl || null,
+        sector: holding.sector || null,
+        country: holding.country || null,
+        asset_type: holding.assetType || null,
+        coupon: holding.coupon || null,
+        maturity_date: holding.maturityDate || null,
+        yield_to_maturity: holding.yieldToMaturity || null,
+        trade_date: holding.tradeDate || null,
+        settlement_date: holding.settlementDate || null,
+        market_price: holding.marketPrice || null,
+        account_id: holding.accountId || null,
+        portfolio_name: holding.portfolioName || null,
       }))
 
       const { error: holdingsError } = await supabase.from("portfolio_holdings").insert(holdings)
@@ -315,8 +307,75 @@ export function PortfolioUploadForm() {
     updateMapping(field, value === "none" ? "" : value)
   }
 
+  const getFieldMappingByBloombergField = (bloombergField: string) => {
+    return BLOOMBERG_FIELD_MAPPINGS.find(mapping => mapping.bloombergField === bloombergField)
+  }
+
+  const getMappingsByCategory = (category: string) => {
+    if (category === "all") return BLOOMBERG_FIELD_MAPPINGS
+    return BLOOMBERG_FIELD_MAPPINGS.filter(mapping => mapping.category === category)
+  }
+
+  const formatValue = (value: any, type: string): string => {
+    if (value === null || value === undefined) return "-"
+    
+    switch (type) {
+      case 'currency':
+        return `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      case 'percentage':
+        return `${(Number(value) * 100).toFixed(2)}%`
+      case 'number':
+        return Number(value).toLocaleString('en-US')
+      case 'date':
+        return value
+      default:
+        return String(value)
+    }
+  }
+
   return (
     <div className="space-y-6">
+      {/* Help Section */}
+      <Card className="border-blue-200 bg-blue-50/50 dark:border-blue-800 dark:bg-blue-950/20">
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2 text-blue-900 dark:text-blue-100">
+            <HelpCircle className="w-5 h-5" />
+            <span>Bloomberg CSV Import Guide</span>
+          </CardTitle>
+          <CardDescription className="text-blue-700 dark:text-blue-300">
+            Import your portfolio data from Bloomberg Terminal exports or other CSV files with flexible column mapping.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid md:grid-cols-2 gap-4 text-sm">
+            <div>
+              <h4 className="font-semibold mb-2">Supported Bloomberg Fields:</h4>
+              <ul className="space-y-1 text-blue-600 dark:text-blue-400">
+                <li>• Ticker symbols (TICKER)</li>
+                <li>• Security names (SECURITY_NAME)</li>
+                <li>• Portfolio weights (WEIGHT_PCT)</li>
+                <li>• Market values (MKT_VAL)</li>
+                <li>• Cost basis (COST_VALUE)</li>
+                <li>• P&L data (UNREALIZED_PL, REALIZED_PL)</li>
+                <li>• Sector classifications (INDUSTRY_SECTOR)</li>
+                <li>• And many more...</li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="font-semibold mb-2">File Requirements:</h4>
+              <ul className="space-y-1 text-blue-600 dark:text-blue-400">
+                <li>• CSV format (.csv files)</li>
+                <li>• First row must contain headers</li>
+                <li>• Ticker column is required</li>
+                <li>• Other columns are optional</li>
+                <li>• Supports various delimiters (comma, semicolon, tab)</li>
+              </ul>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Upload Form */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center space-x-2">
@@ -324,13 +383,13 @@ export function PortfolioUploadForm() {
             <span>Upload Portfolio File</span>
           </CardTitle>
           <CardDescription>
-            Supported formats: CSV, TXT. Your file should contain ticker symbols and optionally weights, shares, or
-            purchase prices.
+            Upload your portfolio data from Bloomberg Terminal exports, Excel exports, or other CSV files.
+            Our system will automatically detect and map common Bloomberg field names.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="portfolioName">Portfolio Name</Label>
+            <Label htmlFor="portfolioName">Portfolio Name *</Label>
             <Input
               id="portfolioName"
               placeholder="My Investment Portfolio"
@@ -352,18 +411,18 @@ export function PortfolioUploadForm() {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="file">Portfolio File</Label>
+            <Label htmlFor="file">Portfolio File *</Label>
             <Input id="file" type="file" accept=".csv,.txt" onChange={handleFileChange} className="cursor-pointer" />
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              CSV format: Recommended column order: Ticker, Percentage, Share Price, Shares - map as needed
-              <br />
-              TXT format: ticker percentage share_price shares (space or comma separated, optional fields)
-            </p>
+            <div className="text-xs text-slate-500 dark:text-slate-400 space-y-1">
+              <p><strong>CSV format:</strong> Recommended for Bloomberg exports. Include headers in the first row.</p>
+              <p><strong>TXT format:</strong> Simple format: ticker percentage share_price shares (space or comma separated)</p>
+              <p><strong>Auto-detection:</strong> We'll automatically detect Bloomberg field names and map them appropriately.</p>
+            </div>
           </div>
 
           {file && !showPreview && (
             <Button onClick={handleLoadHeaders} disabled={isLoading} className="w-full">
-              {isLoading ? "Loading..." : "Load File"}
+              {isLoading ? "Analyzing File..." : "Load and Analyze File"}
             </Button>
           )}
 
@@ -376,111 +435,174 @@ export function PortfolioUploadForm() {
         </CardContent>
       </Card>
 
+      {/* Field Mapping Interface */}
+      {showPreview && isCSV && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <Settings className="w-5 h-5" />
+                <span>Field Mapping</span>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowAdvancedMapping(!showAdvancedMapping)}
+              >
+                {showAdvancedMapping ? "Hide Advanced" : "Show Advanced"}
+              </Button>
+            </CardTitle>
+            <CardDescription>
+              Map your CSV columns to portfolio fields. Required fields are marked with *.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Tabs value={selectedCategory} onValueChange={setSelectedCategory}>
+              <TabsList className="grid w-full grid-cols-6">
+                <TabsTrigger value="all">All</TabsTrigger>
+                <TabsTrigger value="security">Security</TabsTrigger>
+                <TabsTrigger value="holdings">Holdings</TabsTrigger>
+                <TabsTrigger value="analytics">Analytics</TabsTrigger>
+                <TabsTrigger value="type">Type</TabsTrigger>
+                <TabsTrigger value="trade">Trade</TabsTrigger>
+              </TabsList>
+              
+              <TabsContent value={selectedCategory} className="mt-4">
+                <div className="grid gap-4">
+                  {getMappingsByCategory(selectedCategory).map((mapping) => {
+                    const fieldName = mapping.bloombergField.toLowerCase().replace(/_/g, '') as keyof ColumnMappings;
+                    const currentValue = mappings[fieldName] || "";
+                    
+                    return (
+                      <div key={mapping.bloombergField} className="flex items-center space-x-4 p-3 border rounded-lg">
+                        <div className="flex-1">
+                          <div className="flex items-center space-x-2">
+                            <Label className="font-medium">
+                              {mapping.displayName}
+                              {mapping.required && <span className="text-red-500 ml-1">*</span>}
+                            </Label>
+                            <Badge variant="secondary" className="text-xs">
+                              {mapping.dataType}
+                            </Badge>
+                          </div>
+                          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
+                            {mapping.description}
+                          </p>
+                          <div className="text-xs text-slate-500 mt-1">
+                            <strong>Examples:</strong> {mapping.examples.join(", ")}
+                          </div>
+                        </div>
+                        <div className="w-64">
+                          <Select
+                            value={currentValue || "none"}
+                            onValueChange={(value) => {
+                              if (mapping.required) {
+                                updateMapping(fieldName, value === "none" ? "" : value);
+                              } else {
+                                handleOptionalChange(fieldName, value);
+                              }
+                            }}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder={`Select ${mapping.displayName}`} />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="none">None</SelectItem>
+                              {headers.map((header) => (
+                                <SelectItem key={header} value={header}>
+                                  {header}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </TabsContent>
+            </Tabs>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Data Preview */}
       {showPreview && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center space-x-2">
               <CheckCircle2 className="w-5 h-5 text-green-600" />
-              <span>Preview {parsedData ? `(${parsedData.length} holdings)` : ""}</span>
+              <span>Data Preview {parsedData ? `(${parsedData.length} holdings)` : ""}</span>
             </CardTitle>
             <CardDescription>Review your portfolio data before creating</CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="max-h-64 overflow-y-auto border rounded-lg">
+            {/* Validation Messages */}
+            {parseResult && (parseResult.errors.length > 0 || parseResult.warnings.length > 0) && (
+              <div className="space-y-2 mb-4">
+                {parseResult.errors.map((error, index) => (
+                  <Alert key={index} variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>{error}</AlertDescription>
+                  </Alert>
+                ))}
+                {parseResult.warnings.map((warning, index) => (
+                  <Alert key={index} variant="default">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>{warning}</AlertDescription>
+                  </Alert>
+                ))}
+              </div>
+            )}
+
+            <div className="max-h-96 overflow-y-auto border rounded-lg">
               <table className="w-full text-sm">
                 <thead className="bg-slate-50 dark:bg-slate-800 sticky top-0">
                   <tr>
-                    {isCSV ? (
+                    <th className="text-left p-2 border-b">Ticker</th>
+                    <th className="text-left p-2 border-b">Weight</th>
+                    <th className="text-left p-2 border-b">Shares</th>
+                    <th className="text-left p-2 border-b">Price</th>
+                    {showAdvancedMapping && (
                       <>
-                        <th className="text-left p-2 border-b">
-                          <Select value={mappings.ticker} onValueChange={(v) => updateMapping("ticker", v)}>
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder="Select Ticker" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {headers.map((header) => (
-                                <SelectItem key={header} value={header}>
-                                  {header}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </th>
-                        <th className="text-left p-2 border-b">
-                          <Select value={getOptionalValue("weight")} onValueChange={(v) => handleOptionalChange("weight", v)}>
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder="Select Percentage" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="none">None</SelectItem>
-                              {headers.map((header) => (
-                                <SelectItem key={header} value={header}>
-                                  {header}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </th>
-                        <th className="text-left p-2 border-b">
-                          <Select value={getOptionalValue("purchasePrice")} onValueChange={(v) => handleOptionalChange("purchasePrice", v)}>
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder="Select Share Price" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="none">None</SelectItem>
-                              {headers.map((header) => (
-                                <SelectItem key={header} value={header}>
-                                  {header}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </th>
-                        <th className="text-left p-2 border-b">
-                          <Select value={getOptionalValue("shares")} onValueChange={(v) => handleOptionalChange("shares", v)}>
-                            <SelectTrigger className="w-full">
-                              <SelectValue placeholder="Select Shares" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="none">None</SelectItem>
-                              {headers.map((header) => (
-                                <SelectItem key={header} value={header}>
-                                  {header}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </th>
-                      </>
-                    ) : (
-                      <>
-                        <th className="text-left p-2 border-b">Ticker</th>
-                        <th className="text-left p-2 border-b">Percentage</th>
-                        <th className="text-left p-2 border-b">Share Price</th>
-                        <th className="text-left p-2 border-b">Shares</th>
+                        <th className="text-left p-2 border-b">Market Value</th>
+                        <th className="text-left p-2 border-b">Sector</th>
+                        <th className="text-left p-2 border-b">Asset Type</th>
                       </>
                     )}
                   </tr>
                 </thead>
                 <tbody>
                   {parsedData && parsedData.length > 0 ? (
-                    parsedData.map((holding, index) => (
+                    parsedData.slice(0, 20).map((holding, index) => (
                       <tr key={index} className="border-b">
                         <td className="p-2 font-mono">{holding.ticker}</td>
-                        <td className="p-2">{holding.weight ? `${(holding.weight * 100).toFixed(2)}%` : "-"}</td>
-                        <td className="p-2">{holding.purchasePrice ? `$${holding.purchasePrice.toFixed(2)}` : "-"}</td>
-                        <td className="p-2">{holding.shares || "-"}</td>
+                        <td className="p-2">{formatValue(holding.weight, 'percentage')}</td>
+                        <td className="p-2">{formatValue(holding.shares, 'number')}</td>
+                        <td className="p-2">{formatValue(holding.purchasePrice || holding.marketPrice, 'currency')}</td>
+                        {showAdvancedMapping && (
+                          <>
+                            <td className="p-2">{formatValue(holding.marketValue, 'currency')}</td>
+                            <td className="p-2">{holding.sector || "-"}</td>
+                            <td className="p-2">{holding.assetType || "-"}</td>
+                          </>
+                        )}
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={4} className="p-2 text-center text-slate-500">
+                      <td colSpan={showAdvancedMapping ? 7 : 4} className="p-2 text-center text-slate-500">
                         {isCSV ? "Select columns to preview data" : "No data available"}
                       </td>
                     </tr>
                   )}
                 </tbody>
               </table>
+              {parsedData && parsedData.length > 20 && (
+                <div className="p-2 text-center text-sm text-slate-500 bg-slate-50 dark:bg-slate-800">
+                  Showing first 20 of {parsedData.length} holdings
+                </div>
+              )}
             </div>
 
             <div className="flex justify-between mt-4">
@@ -489,6 +611,7 @@ export function PortfolioUploadForm() {
                 onClick={() => {
                   setShowPreview(false)
                   setParsedData(null)
+                  setParseResult(null)
                 }}
               >
                 Change File
@@ -498,7 +621,7 @@ export function PortfolioUploadForm() {
                 loading={isLoading}
                 loadingText="Creating portfolio..."
                 spinnerPlacement="start"
-                disabled={!parsedData || !portfolioName.trim()}
+                disabled={!parsedData || !portfolioName.trim() || (parseResult?.errors.length || 0) > 0}
               >
                 Create Portfolio
               </LoadingButton>
