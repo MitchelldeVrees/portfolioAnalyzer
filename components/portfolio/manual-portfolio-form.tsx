@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Plus, Trash2, AlertCircle, Calculator } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { TickerAutocomplete } from "./ticker-autocomplete"
 
 interface Holding {
   id: string
@@ -204,11 +205,10 @@ export function ManualPortfolioForm() {
               <div key={holding.id} className="grid grid-cols-12 gap-4 items-end p-4 border rounded-lg">
                 <div className="col-span-3">
                   <Label htmlFor={`ticker-${holding.id}`}>Ticker Symbol</Label>
-                  <Input
-                    id={`ticker-${holding.id}`}
-                    placeholder="AAPL"
+                  <TickerAutocomplete
                     value={holding.ticker}
-                    onChange={(e) => updateHolding(holding.id, "ticker", e.target.value.toUpperCase())}
+                    onChange={(value) => updateHolding(holding.id, "ticker", value)}
+                    placeholder="Search tickers..."
                     className="font-mono"
                   />
                 </div>

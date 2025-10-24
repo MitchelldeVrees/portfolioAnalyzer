@@ -30,7 +30,7 @@ export function PortfolioList({ portfolios }: PortfolioListProps) {
                 <Upload className="w-6 h-6 text-blue-600 dark:text-blue-400" />
               </div>
               <CardTitle className="text-slate-900 dark:text-slate-100">Upload Portfolio</CardTitle>
-              <CardDescription>Upload CSV, Excel, or text files with your portfolio data</CardDescription>
+              <CardDescription>Import from Bloomberg Terminal exports, Excel, or CSV files with advanced field mapping</CardDescription>
             </CardHeader>
           </Link>
         </Card>
