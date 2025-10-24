@@ -3,6 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchQuotesBatch, fetchHistoryMonthlyClose } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
+import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
 
 type Holding = {
   id: string;
@@ -73,96 +74,6 @@ function daysUntil(date: Date | null | undefined): number | null {
   const ms = date.getTime() - Date.now();
   return Math.ceil(ms / (1000 * 60 * 60 * 24));
 }
-
-// ------------ sector helper ------------
-// --- Drop-in replacement (paste over your current getSectorForTicker) ---
-// Requires: `import yahooFinance from "yahoo-finance2";` already present in the file.
-
-function getSectorForTicker(ticker: string): string {
-  const t = (ticker || "").toUpperCase().trim();
-  if (!t) return "Other";
-
-  // 1) Fast path: built-in map for common names (keeps current behavior instant)
-  const BUILTIN: Record<string, string> = {
-    AAPL: "Technology",
-    MSFT: "Technology",
-    GOOGL: "Technology",
-    NVDA: "Technology",
-    META: "Technology",
-    AMZN: "Consumer Discretionary",
-    TSLA: "Consumer Discretionary",
-    JPM: "Financial Services",
-    V: "Financial Services",
-    JNJ: "Healthcare",
-  };
-  if (BUILTIN[t]) return BUILTIN[t];
-
-  // 2) Try cache (populated by a background Yahoo fetch)
-  const hit = _sectorCache.get(t);
-  const now = Date.now();
-  if (hit && (now - hit.ts) < SECTOR_TTL_MS && typeof hit.sector === "string") {
-    return hit.sector;
-  }
-
-  // 3) If no fresh cache, kick off a background fetch (non-blocking) and return "Other" for now.
-  //    Next request for the same ticker should hit the cache with the real sector.
-  if (!hit?.inflight) {
-    const inflight = _fetchSectorFromYahoo(t)
-      .then((sector) => {
-        _sectorCache.set(t, { sector: sector || "Other", ts: Date.now(), inflight: null });
-      })
-      .catch(() => {
-        _sectorCache.set(t, { sector: "Other", ts: Date.now(), inflight: null });
-      });
-    _sectorCache.set(t, { sector: hit?.sector ?? "Other", ts: hit?.ts ?? 0, inflight });
-  }
-
-  return "Other";
-}
-
-// --- Internal cache & helpers ---
-const SECTOR_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
-type SectorEntry = { sector: string; ts: number; inflight: Promise<void> | null };
-const _sectorCache: Map<string, SectorEntry> = new Map();
-
-async function _fetchSectorFromYahoo(ticker: string): Promise<string | null> {
-  try {
-    // Ask Yahoo for sector info (equities: assetProfile/summaryProfile; ETFs: label as "ETF")
-    const qs: any = await yahooFinance.quoteSummary(ticker, {
-      modules: ["assetProfile", "summaryProfile", "price"],
-    });
-
-    // Prefer assetProfile.sector, then summaryProfile.sector
-    const fromAsset = qs?.assetProfile?.sector;
-    const fromSummary = qs?.summaryProfile?.sector;
-
-    // Simple ETF detection
-    const quoteType = qs?.price?.quoteType || qs?.price?.quoteType?.raw;
-    const isETF = (typeof quoteType === "string") && quoteType.toUpperCase() === "ETF";
-    if (isETF) return "ETF";
-
-    const sector = (typeof fromAsset === "string" && fromAsset) || (typeof fromSummary === "string" && fromSummary);
-    return sector || null;
-  } catch {
-    return null;
-  }
-}
-
-// --- Optional: pre-warm cache in one shot (call before building tables if you want fresh sectors immediately) ---
-export async function warmSectorCache(tickers: string[]) {
-  const uniq = Array.from(new Set((tickers || []).map(t => (t || "").toUpperCase().trim()).filter(Boolean)));
-  await Promise.all(
-    uniq.map(async (t) => {
-      const hit = _sectorCache.get(t);
-      const fresh = hit && (Date.now() - hit.ts) < SECTOR_TTL_MS && typeof hit.sector === "string";
-      if (!fresh) {
-        const s = await _fetchSectorFromYahoo(t);
-        _sectorCache.set(t, { sector: s || "Other", ts: Date.now(), inflight: null });
-      }
-    })
-  );
-}
-
 
 // ------------ math helpers (monthly fallback) ------------
 function pctReturns(series: number[]): number[] {
@@ -332,8 +243,6 @@ type RiskInputs = {
   shortPctFloat: number | null;
   shortRatio: number | null;
   daysToEarnings: number | null;
-  weightPct: number | null; // holding's share of portfolio in %
-
 };
 
 // returns 0..100 and detailed components
@@ -365,13 +274,7 @@ function computeRiskScore(x: RiskInputs) {
                    ? (x.daysToEarnings <= 7 ? 100 : x.daysToEarnings <= 21 ? 60 : 0)
                    : 20;
 
-  // --- NEW: Position size (maps weight% to risk 0..100) ---
-  // Tune these bounds to your taste. Example:
-  // 1% position ~ 0 risk contribution; 15%+ ~ maxed risk.
-  const sPos   = (x.weightPct != null) ? scoreLinear(x.weightPct, 1, 15)! : 50;
-
-  // Keep existing mix, scaled by 0.9, and add 10% for position size.
-  const baseScore =
+  const score =
       0.20 * sVol  + 0.10 * sMDD + 0.05 * sBeta +
       0.15 * sD2E  + 0.10 * sICov +
       0.06 * sPE   + 0.05 * sPEG + 0.04 * sFCFY +
@@ -379,26 +282,21 @@ function computeRiskScore(x: RiskInputs) {
       0.10 * sShort+
       0.05 * sEvt;
 
-  const score = 0.90 * baseScore + 0.10 * sPos;
-
   const riskScore = Math.round(score);
   const bucket = riskScore < 33 ? "Low" : riskScore < 66 ? "Medium" : "High";
 
   const components = [
-    { key: "vol",   label: "Volatility (12m)",        score: sVol,   weight: 0.20 * 0.90, value: x.vol12mPct },
-    { key: "mdd",   label: "Max Drawdown (12m)",      score: sMDD,   weight: 0.10 * 0.90, value: x.mdd12mPct },
-    { key: "beta",  label: "Beta",                    score: sBeta,  weight: 0.05 * 0.90, value: x.beta },
-    { key: "d2e",   label: "Debt/Equity",             score: sD2E,   weight: 0.15 * 0.90, value: x.debtToEquity },
-    { key: "icov",  label: "Interest Coverage",       score: sICov,  weight: 0.10 * 0.90, value: x.interestCoverage },
-    { key: "pe",    label: "P/E (or P/S)",            score: sPE,    weight: 0.06 * 0.90, value: x.trailingPE ?? x.ps },
-    { key: "peg",   label: "PEG",                     score: sPEG,   weight: 0.05 * 0.90, value: x.peg },
-    { key: "fcfy",  label: "FCF Yield %",             score: sFCFY,  weight: 0.04 * 0.90, value: x.fcfYieldPct },
-    { key: "adv",   label: "Avg $ Volume (10d)",      score: sADV,   weight: 0.10 * 0.90, value: x.avgDollarVol },
-    { key: "short", label: "Short Interest",          score: sShort, weight: 0.10 * 0.90, value: x.shortPctFloat ?? x.shortRatio },
-    { key: "evt",   label: "Earnings Proximity",      score: sEvt,   weight: 0.05 * 0.90, value: x.daysToEarnings },
-
-    // NEW component
-    { key: "pos",   label: "Position Size (weight %)", score: sPos,  weight: 0.10,        value: x.weightPct },
+    { key: "vol",   label: "Volatility (12m)",        score: sVol,   weight: 0.20, value: x.vol12mPct },
+    { key: "mdd",   label: "Max Drawdown (12m)",      score: sMDD,   weight: 0.10, value: x.mdd12mPct },
+    { key: "beta",  label: "Beta",                    score: sBeta,  weight: 0.05, value: x.beta },
+    { key: "d2e",   label: "Debt/Equity",             score: sD2E,   weight: 0.15, value: x.debtToEquity },
+    { key: "icov",  label: "Interest Coverage",       score: sICov,  weight: 0.10, value: x.interestCoverage },
+    { key: "pe",    label: "P/E (or P/S)",            score: sPE,    weight: 0.06, value: x.trailingPE ?? x.ps },
+    { key: "peg",   label: "PEG",                     score: sPEG,   weight: 0.05, value: x.peg },
+    { key: "fcfy",  label: "FCF Yield %",             score: sFCFY,  weight: 0.04, value: x.fcfYieldPct },
+    { key: "adv",   label: "Avg $ Volume (10d)",      score: sADV,   weight: 0.10, value: x.avgDollarVol },
+    { key: "short", label: "Short Interest",          score: sShort, weight: 0.10, value: x.shortPctFloat ?? x.shortRatio },
+    { key: "evt",   label: "Earnings Proximity",      score: sEvt,   weight: 0.05, value: x.daysToEarnings },
   ];
 
   return { riskScore, bucket, components };
@@ -491,6 +389,11 @@ async function computeHoldingsSnapshot(
   }
 
   const symbols = sanitized.map((h) => h.ticker);
+  try {
+    await ensureSectors(symbols);
+  } catch (error) {
+    console.warn("[holdings] sector preload failed", (error as Error)?.message ?? error);
+  }
   const quotesMap = (await fetchQuotesBatch(symbols)) || {};
 
   const temp = sanitized.map((h) => {
@@ -515,7 +418,7 @@ async function computeHoldingsSnapshot(
       totalValue,
       hasCostBasis,
       returnSincePurchase,
-      sector: getSectorForTicker(h.ticker),
+      sector: sectorForTicker(h.ticker),
     };
   });
 
@@ -610,7 +513,6 @@ async function computeHoldingsSnapshot(
 
     const { riskScore, bucket, components } = computeRiskScore({
       ...inputs,
-      weightPct: h.weightPct,
     });
 
     return {

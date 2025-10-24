@@ -8,7 +8,31 @@ import { getSectorForTicker, normSectorName, SECTOR_LEADERS } from "./sectorUtil
 
 export const runtime = "nodejs";
 
+type PdfErrorMeta = {
+  status?: number
+  upstream?: string
+  publicMessage?: string
+}
+
+class PdfGenerationError extends Error {
+  meta: PdfErrorMeta
+
+  constructor(message: string, meta: PdfErrorMeta) {
+    super(message)
+    this.meta = meta
+  }
+}
+
+async function safeJson<T = any>(response: Response): Promise<T | null> {
+  try {
+    return (await response.json()) as T
+  } catch {
+    return null
+  }
+}
+
 export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+  const startedAt = Date.now();
   try {
     const supabase = await createServerClient();
     const { data: auth, error: authError } = await supabase.auth.getUser();
@@ -55,8 +79,26 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       fetch(`${origin}/api/portfolio/${params.id}/research`, { headers: { cookie: cookieHeader } }),
     ]);
 
-    const data = dataRes.ok ? await dataRes.json() : null;
-    const research = researchRes.ok ? await researchRes.json() : null;
+    if (!dataRes.ok) {
+      const body = await safeJson<{ error?: string }>(dataRes);
+      throw new PdfGenerationError(`Portfolio data request failed (${dataRes.status})`, {
+        status: dataRes.status,
+        upstream: `/api/portfolio/${params.id}/data`,
+        publicMessage: body?.error || "Portfolio analytics service unavailable.",
+      });
+    }
+
+    if (!researchRes.ok) {
+      const body = await safeJson<{ error?: string }>(researchRes);
+      throw new PdfGenerationError(`Research data request failed (${researchRes.status})`, {
+        status: researchRes.status,
+        upstream: `/api/portfolio/${params.id}/research`,
+        publicMessage: body?.error || "Research service temporarily unavailable.",
+      });
+    }
+
+    const data = await dataRes.json();
+    const research = await researchRes.json();
 
     // 4) Branding assets
     const logoDataUri = await chartToDataUri(`${origin}/portify-logo.png`);
@@ -432,11 +474,37 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       advanced,
     });
 
-    return NextResponse.json({
+    const responsePayload = {
       html: pdfHtml,
       filename: `${String(portfolio.name ?? "Portfolio").replace(/\s+/g, "_")}_Analysis_Report.pdf`,
+    };
+
+    const durationMs = Date.now() - startedAt;
+    console.info("[pdf] generation success", {
+      portfolioId: params.id,
+      durationMs,
+      holdings: Array.isArray(portfolio.portfolio_holdings) ? portfolio.portfolio_holdings.length : 0,
     });
+
+    return NextResponse.json(responsePayload);
   } catch (error) {
+    const durationMs = Date.now() - startedAt;
+
+    if (error instanceof PdfGenerationError) {
+      console.error("[pdf] generation failure", {
+        portfolioId: params.id,
+        durationMs,
+        upstream: error.meta.upstream,
+        status: error.meta.status,
+        message: error.message,
+      });
+      const status = error.meta.status ?? 502;
+      return NextResponse.json(
+        { error: error.meta.publicMessage ?? "Failed to generate PDF", upstream: error.meta.upstream ?? null },
+        { status },
+      );
+    }
+
     console.error("Error generating PDF:", error);
     return NextResponse.json({ error: "Failed to generate PDF" }, { status: 500 });
   }

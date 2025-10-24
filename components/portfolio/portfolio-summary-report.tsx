@@ -6,9 +6,16 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
+import {
   FileText,
   Download,
-  Mail,
   TrendingUp,
   TrendingDown,
   AlertTriangle,
@@ -20,6 +27,7 @@ import {
   Info,
 } from "lucide-react"
 import { format } from "date-fns"
+import { toast } from "@/hooks/use-toast"
 
 interface PortfolioHolding {
   id: string
@@ -82,6 +90,7 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
   const [today, setToday] = useState<string>("")
   const [summary, setSummary] = useState<SummaryResp | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [isScoreBreakdownOpen, setIsScoreBreakdownOpen] = useState(false)
 
   useEffect(() => {
     setToday(format(new Date(), "MMMM d, yyyy"))
@@ -107,6 +116,10 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
       cancelled = true
     }
   }, [portfolio?.id])
+
+  const overallScore = summary?.overall?.score ?? null
+  const overallComponents = summary?.overall?.components ?? []
+  const hasScoreBreakdown = overallComponents.length > 0
 
   // Keep your existing sections for now (can later be wired to the summary payload if desired)
   const holdingsCountStatic = portfolio?.portfolio_holdings?.length ?? 0
@@ -235,10 +248,15 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
 
   const handleExportPDF = async () => {
     if (!portfolio?.id) {
-      alert("Portfolio is not loaded yet.")
+      toast({
+        title: "Portfolio unavailable",
+        description: "Load the portfolio before generating a PDF report.",
+        variant: "destructive",
+      })
       return
     }
     setIsGenerating(true)
+    const start = typeof performance !== "undefined" ? performance.now() : Date.now()
     try {
       const response = await fetch(`/api/portfolio/${portfolio.id}/pdf`, {
         method: "POST",
@@ -247,10 +265,38 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
       })
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}))
-        throw new Error(errBody?.error || `Failed to generate PDF (status ${response.status})`)
+        const message = errBody?.error || `Failed to generate PDF (status ${response.status})`
+        const upstream = errBody?.upstream as string | undefined
+        const duration = (typeof performance !== "undefined" ? performance.now() : Date.now()) - start
+        console.error("[pdf] download failed", {
+          portfolioId: portfolio.id,
+          status: response.status,
+          upstream,
+          durationMs: Math.round(duration),
+          message,
+        })
+        toast({
+          title: "PDF export failed",
+          description: upstream ? `${message} (upstream: ${upstream})` : message,
+          variant: "destructive",
+        })
+        return
       }
-      const { html } = await response.json()
-      if (!html) throw new Error("PDF HTML was not returned by the API")
+      const { html, filename } = await response.json()
+      if (!html) {
+        const duration = (typeof performance !== "undefined" ? performance.now() : Date.now()) - start
+        console.error("[pdf] download failed", {
+          portfolioId: portfolio.id,
+          durationMs: Math.round(duration),
+          message: "PDF HTML missing from response",
+        })
+        toast({
+          title: "PDF export failed",
+          description: "Report content was missing from the response. Please try again.",
+          variant: "destructive",
+        })
+        return
+      }
 
       const iframe = document.createElement("iframe")
       iframe.style.position = "fixed"
@@ -273,9 +319,26 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
         iframe.contentWindow?.print()
         setTimeout(() => document.body.removeChild(iframe), 500)
       }, 300)
+
+      const duration = (typeof performance !== "undefined" ? performance.now() : Date.now()) - start
+      console.info("[pdf] download success", {
+        portfolioId: portfolio.id,
+        durationMs: Math.round(duration),
+        filename,
+      })
     } catch (e) {
-      console.error(e)
-      alert(e instanceof Error ? e.message : "Failed to generate PDF report.")
+      const duration = (typeof performance !== "undefined" ? performance.now() : Date.now()) - start
+      const message = e instanceof Error ? e.message : "Failed to generate PDF report."
+      console.error("[pdf] download exception", {
+        portfolioId: portfolio?.id,
+        durationMs: Math.round(duration),
+        error: message,
+      })
+      toast({
+        title: "PDF export failed",
+        description: message,
+        variant: "destructive",
+      })
     } finally {
       setIsGenerating(false)
     }
@@ -350,12 +413,63 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
         <CardContent>
           {error && <div className="text-red-600 dark:text-red-400 mb-4">Error: {error}</div>}
           <div className="grid md:grid-cols-4 gap-6">
-            <div className="text-center">
-              <div className="text-3xl font-bold text-slate-900 dark:text-slate-100 mb-1">
-                {summary ? summary.overall.score : "…"} / 100
+            <Dialog open={isScoreBreakdownOpen} onOpenChange={setIsScoreBreakdownOpen}>
+              <div className="text-center">
+                <div className="text-3xl font-bold text-slate-900 dark:text-slate-100 mb-1">
+                  {overallScore != null ? `${overallScore} / 100` : "…"}
+                </div>
+                <div className="text-sm text-slate-600 dark:text-slate-400">
+                  Overall Score
+                  {hasScoreBreakdown ? (
+                    <DialogTrigger asChild>
+                      <Button variant="link" size="sm" className="mt-1 h-auto px-0">
+                        View breakdown
+                      </Button>
+                    </DialogTrigger>
+                  ) : null}
+                </div>
               </div>
-              <div className="text-sm text-slate-600 dark:text-slate-400">Overall Score</div>
-            </div>
+
+              {hasScoreBreakdown ? (
+                <DialogContent className="sm:max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>Overall Score Breakdown</DialogTitle>
+                    <DialogDescription>
+                      Weighted contribution of allocation, risk, performance, and quality metrics.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="space-y-5">
+                    {overallComponents.map((component) => (
+                      <div
+                        key={component.key}
+                        className="space-y-2 rounded-lg border border-slate-200/70 dark:border-slate-800 p-4"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                            {component.label}
+                          </div>
+                          <div className="text-xs font-mono text-slate-600 dark:text-slate-400">
+                            +{component.contribution}/100
+                          </div>
+                        </div>
+                        <Progress value={component.scorePct} className="h-2" />
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-400">
+                          <span>Subscore {component.scorePct}%</span>
+                          <span>Weight {(component.weight * 100).toFixed(0)}%</span>
+                        </div>
+                        {component.rationale?.length ? (
+                          <ul className="list-disc space-y-1 pl-4 text-xs text-slate-600 dark:text-slate-400">
+                            {component.rationale.map((item, idx) => (
+                              <li key={idx}>{item}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </DialogContent>
+              ) : null}
+            </Dialog>
 
             {/* Total Return: only when cost basis is meaningful */}
             {totalReturnPct != null ? (
