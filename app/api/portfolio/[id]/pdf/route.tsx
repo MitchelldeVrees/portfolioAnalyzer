@@ -47,16 +47,12 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     const origin = new URL(request.url).origin;
     const cookieHeader = request.headers.get("cookie") || "";
 
-    // 3) Get analysis data & research
-    const [dataRes, researchRes] = await Promise.all([
-      fetch(`${origin}/api/portfolio/${params.id}/data?benchmark=${encodeURIComponent(benchmark)}`, {
-        headers: { cookie: cookieHeader },
-      }),
-      fetch(`${origin}/api/portfolio/${params.id}/research`, { headers: { cookie: cookieHeader } }),
-    ]);
+    // 3) Get analysis data
+    const dataRes = await fetch(`${origin}/api/portfolio/${params.id}/data?benchmark=${encodeURIComponent(benchmark)}`, {
+      headers: { cookie: cookieHeader },
+    });
 
     const data = dataRes.ok ? await dataRes.json() : null;
-    const research = researchRes.ok ? await researchRes.json() : null;
 
     // 4) Branding assets
     const logoDataUri = await chartToDataUri(`${origin}/portify-logo.png`);
@@ -418,7 +414,6 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       ...portfolio,
       profile,
       data,
-      research,
       benchmark,
       charts: { performanceChartUri, allocationChartUri },
       branding: brand,
@@ -441,7 +436,6 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     return NextResponse.json({ error: "Failed to generate PDF" }, { status: 500 });
   }
 }
-
 
 
 

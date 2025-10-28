@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
-import { FileDown, ExternalLink } from "lucide-react"
+import { FileDown } from "lucide-react"
 
 type DataResponse = {
   holdings: Array<{
@@ -39,25 +39,8 @@ type DataResponse = {
   }
 }
 
-type ResearchResponse = {
-  insights: any
-  recommendations: Array<{
-    title?: string
-    description: string
-    rationale?: string
-    whyItMatters?: string
-    consequences?: string
-    priority?: string
-    confidence?: number
-    sources?: string[]
-    sourceLinks?: Array<{ title: string; url: string }>
-    type?: string
-  }>
-}
-
 export function SummaryView({ portfolioId, portfolioName }: { portfolioId: string; portfolioName: string }) {
   const [data, setData] = useState<DataResponse | null>(null)
-  const [research, setResearch] = useState<ResearchResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
   const [isDownloading, setIsDownloading] = useState(false)
@@ -67,17 +50,11 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
     async function load() {
       try {
         setLoading(true)
-        const [dRes, rRes] = await Promise.all([
-          fetch(`/api/portfolio/${portfolioId}/data`),
-          fetch(`/api/portfolio/${portfolioId}/research`),
-        ])
+        const dRes = await fetch(`/api/portfolio/${portfolioId}/data`)
         if (!dRes.ok) throw new Error("Failed to load portfolio data")
-        if (!rRes.ok) throw new Error("Failed to load research")
         const d = (await dRes.json()) as DataResponse
-        const r = (await rRes.json()) as ResearchResponse
         if (!cancelled) {
           setData(d)
-          setResearch(r)
         }
       } catch (e) {
         if (!cancelled) setErr(e instanceof Error ? e.message : "Failed to load summary")
@@ -236,42 +213,6 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
         </CardContent>
       </Card>
 
-      {research && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Research Highlights</CardTitle>
-            <CardDescription>Recommendations grounded in curated sources</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {research.recommendations.map((r, idx) => (
-              <div key={idx} className="p-4 border rounded-lg">
-                <div className="flex items-center justify-between">
-                  <h4 className="font-medium">{r.title || r.description}</h4>
-                  <div className="text-xs text-slate-500">
-                    {r.priority ? <Badge variant="outline">{r.priority}</Badge> : null}
-                  </div>
-                </div>
-                <p className="text-sm text-slate-600 dark:text-slate-400 mt-2">{r.rationale || r.description}</p>
-                {r.whyItMatters && (
-                  <p className="text-sm text-slate-700 dark:text-slate-300 mt-2"><strong>Why it matters:</strong> {r.whyItMatters}</p>
-                )}
-                {r.consequences && (
-                  <p className="text-sm text-slate-700 dark:text-slate-300 mt-1"><strong>Consequences:</strong> {r.consequences}</p>
-                )}
-                {r.sourceLinks && r.sourceLinks.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-3">
-                    {r.sourceLinks.map((s, i) => (
-                      <a key={i} className="text-xs inline-flex items-center text-blue-600 hover:underline" href={s.url} target="_blank" rel="noopener noreferrer">
-                        <ExternalLink className="w-3 h-3 mr-1" /> {s.title}
-                      </a>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
     </div>
   )
 }
@@ -284,4 +225,3 @@ function Metric({ label, value }: { label: string; value: string }) {
     </div>
   )
 }
-

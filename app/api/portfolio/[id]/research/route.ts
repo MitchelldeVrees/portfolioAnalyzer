@@ -1,235 +1,176 @@
-// /app/api/portfolio/[id]/research/route.ts
 import { type NextRequest, NextResponse } from "next/server"
 import { createServerClient } from "@/lib/supabase/server"
 
-const STALE_AFTER_DAYS = 14
+const MAX_TICKERS = 8
 
-function daysBetween(a: Date, b: Date) {
-  return Math.floor((+a - +b) / (1000 * 60 * 60 * 24))
-}
-
-async function ensureOwnership(supabase: any, portfolioId: string) {
-  const { data: portfolio, error } = await supabase
+async function ensurePortfolioOwnership(supabase: any, portfolioId: string, userId: string) {
+  const { data, error } = await supabase
     .from("portfolios")
-    .select("id, user_id, name")
+    .select("id")
     .eq("id", portfolioId)
-    .single()
-  if (error || !portfolio) return null
-  return portfolio
+    .eq("user_id", userId)
+    .maybeSingle()
+  if (error || !data) return null
+  return data
 }
 
-async function loadTickers(supabase: any, portfolioId: string): Promise<string[]> {
+async function loadHoldingsTickers(supabase: any, portfolioId: string): Promise<string[]> {
   const { data, error } = await supabase
     .from("portfolio_holdings")
     .select("ticker")
     .eq("portfolio_id", portfolioId)
   if (error || !data) return []
-  return (data as { ticker: string }[]).map((r) => (r.ticker || "").toUpperCase())
-}
-
-async function loadLatestResearch(supabase: any, portfolioId: string) {
-  const { data, error } = await supabase
-    .from("portfolio_research")
-    .select("*")
-    .eq("portfolio_id", portfolioId)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle()
-  if (error) return null
-  return data
-}
-
-async function persistResearch(
-  supabase: any,
-  portfolioId: string,
-  payload: { research: any; recommendations?: any[]; meta?: any },
-) {
-  const asOf = payload?.meta?.generatedAt ?? null
-  const lookback = payload?.meta?.lookbackDays ?? STALE_AFTER_DAYS
-  const { data, error } = await supabase
-    .from("portfolio_research")
-    .insert({
-      portfolio_id: portfolioId,
-      as_of_date: asOf,
-      lookback_days: lookback,
-      research: payload.research,
-      recommendations: payload.recommendations ?? null,
-      meta: payload.meta ?? null,
-    })
-    .select()
-    .single()
-  if (error) throw error
-  return data
-}
-
-async function generateResearchViaInternalAPI(
-  request: NextRequest,
-  portfolioId: string,
-  tickers: string[],
-  portfolioName: string | null,
-) {
-  const origin = new URL(request.url).origin
-  const cookieHeader = request.headers.get("cookie") ?? ""
-
-  const [dataRes, holdingsRes] = await Promise.all([
-    fetch(`${origin}/api/portfolio/${portfolioId}/data`, {
-      headers: { cookie: cookieHeader },
-      cache: "no-store",
-    }).catch(() => null),
-    fetch(`${origin}/api/portfolio/${portfolioId}/holdings`, {
-      headers: { cookie: cookieHeader },
-      cache: "no-store",
-    }).catch(() => null),
-  ])
-
-  const portfolioData = dataRes && dataRes.ok ? await dataRes.json().catch(() => null) : null
-  const holdingsData = holdingsRes && holdingsRes.ok ? await holdingsRes.json().catch(() => null) : null
-
-  const payload = {
-    tickers,
-    lookbackDays: STALE_AFTER_DAYS,
-    portfolio: buildPortfolioPayload(portfolioId, portfolioName, portfolioData, holdingsData),
+  const seen = new Set<string>()
+  const tickers: string[] = []
+  for (const row of data) {
+    const ticker = typeof row?.ticker === "string" ? row.ticker.trim().toUpperCase() : ""
+    if (!ticker || seen.has(ticker)) continue
+    seen.add(ticker)
+    tickers.push(ticker)
+    if (tickers.length >= MAX_TICKERS) break
   }
-
-  const url = new URL("/api/research", request.url)
-  const res = await fetch(url.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  })
-  if (!res.ok) throw new Error("Failed to generate research")
-  return (await res.json()) as {
-    realTimeNews: any
-    riskAndScenarioModeling: any
-    fundamentalComparative: any
-    recommendations?: any[]
-    metadata?: any
-  }
+  return tickers
 }
 
-function buildPortfolioPayload(
-  portfolioId: string,
-  portfolioName: string | null,
-  portfolioData: any,
-  holdingsData: any,
-) {
-  const holdings = Array.isArray(holdingsData?.holdings)
-    ? holdingsData.holdings.slice(0, 25).map((h: any) => ({
-        ticker: (h?.ticker || "").toUpperCase(),
-        weightPct: typeof h?.weightPct === "number" ? Number(h.weightPct) : undefined,
-        sector: typeof h?.sector === "string" ? h.sector : undefined,
-        price: typeof h?.price === "number" ? Number(h.price) : undefined,
-        returnSincePurchase:
-          typeof h?.returnSincePurchase === "number" ? Number(h.returnSincePurchase) : h?.returnSincePurchase ?? null,
-        beta12m: typeof h?.beta12m === "number" ? Number(h.beta12m) : undefined,
-        riskBucket: typeof h?.riskBucket === "string" ? h.riskBucket : undefined,
-      }))
-    : []
+const CHATKIT_API_BASE = "https://api.openai.com/v1"
+const CHATKIT_WORKFLOW_HEADER = "workflows=v1"
 
-  return {
-    id: portfolioId,
-    name: portfolioName ?? undefined,
-    metrics: portfolioData?.metrics ?? undefined,
-    risk: portfolioData?.risk ?? undefined,
-    performance: Array.isArray(portfolioData?.performance)
-      ? portfolioData.performance.slice(-12)
-      : undefined,
-    performanceMeta: portfolioData?.performanceMeta ?? undefined,
-    sectors: Array.isArray(portfolioData?.sectors) ? portfolioData.sectors.slice(0, 12) : undefined,
-    holdings,
-  }
-}
+function extractWorkflowText(payload: any): string {
+  if (!payload) return ""
 
-export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
-  try {
-    const supabase = await createServerClient()
-    const { data: auth, error: authError } = await supabase.auth.getUser()
-    if (authError || !auth?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const texts: string[] = []
 
-    const portfolio = await ensureOwnership(supabase, params.id)
-    if (!portfolio) return NextResponse.json({ error: "Not found" }, { status: 404 })
-
-    const existing = await loadLatestResearch(supabase, params.id)
-    if (existing) {
-      const ageDays = daysBetween(new Date(), new Date(existing.created_at))
-      if (ageDays <= STALE_AFTER_DAYS) {
-        return NextResponse.json({
-          report: existing.research,
-          recommendations: existing.recommendations || [],
-          metadata: existing.meta || {},
-          persisted: true,
-          created_at: existing.created_at,
-        })
+  const collect = (value: any) => {
+    if (!value) return
+    if (typeof value === "string") {
+      if (value.trim()) texts.push(value.trim())
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const entry of value) collect(entry)
+      return
+    }
+    if (typeof value === "object") {
+      if (value.type === "text" && typeof value.text === "string") {
+        collect(value.text)
+        return
+      }
+      if (value.type === "message" && Array.isArray(value.content)) {
+        collect(value.content)
+        return
+      }
+      if (value.output_text) {
+        collect(value.output_text)
+        return
+      }
+      for (const key of Object.keys(value)) {
+        collect(value[key])
       }
     }
-
-    const tickers = await loadTickers(supabase, params.id)
-    if (tickers.length === 0) return NextResponse.json({ error: "No holdings" }, { status: 400 })
-
-    const generated = await generateResearchViaInternalAPI(request, params.id, tickers, portfolio.name ?? null)
-    const meta = {
-      ...(generated.metadata ?? {}),
-      lookbackDays: STALE_AFTER_DAYS,
-    }
-    const toPersist = await persistResearch(supabase, params.id, {
-      research: {
-        realTimeNews: generated.realTimeNews,
-        riskAndScenarioModeling: generated.riskAndScenarioModeling,
-        fundamentalComparative: generated.fundamentalComparative,
-      },
-      recommendations: generated.recommendations ?? [],
-      meta,
-    })
-
-    return NextResponse.json({
-      report: toPersist.research,
-      recommendations: toPersist.recommendations || [],
-      metadata: toPersist.meta || meta,
-      persisted: true,
-      created_at: toPersist.created_at,
-    })
-  } catch (err) {
-    console.error("Error ensuring research:", err)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
   }
+
+  collect(payload.output ?? payload.outputs ?? payload.result ?? payload.response)
+
+  if (!texts.length) {
+    const fallback = typeof payload === "string" ? payload : JSON.stringify(payload)
+    texts.push(fallback)
+  }
+
+  const joined = texts.join("\n\n").trim()
+  return joined
 }
 
-export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+async function runChatKitWorkflow(tickers: string[]): Promise<{ text: string; runId?: string; status?: string }> {
+  const workflowId = process.env.CHATKIT_WORKFLOW_ID
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!workflowId) {
+    throw new Error("CHATKIT_WORKFLOW_ID is not configured")
+  }
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not configured")
+  }
+
+  const version = process.env.CHATKIT_WORKFLOW_VERSION
+  const joinedTickers = tickers.map((ticker) => ticker.toLowerCase()).join(", ")
+
+  const url = new URL(`${CHATKIT_API_BASE}/workflows/${workflowId}/runs`)
+  if (version && version.trim().length > 0) {
+    url.searchParams.set("version", version.trim())
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "OpenAI-Beta": CHATKIT_WORKFLOW_HEADER,
+    },
+    body: JSON.stringify({
+      input: joinedTickers,
+    }),
+    cache: "no-store",
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "")
+    console.error("[research] chatkit workflow error", response.status, errorText)
+    throw new Error(`ChatKit workflow request failed (${response.status})`)
+  }
+
+  const payload = await response.json().catch(() => null)
+  const text = extractWorkflowText(payload)
+  const runId = payload?.id
+  const status = payload?.status
+
+  return { text, runId, status }
+}
+
+async function handleRequest(request: NextRequest, params: { id: string }) {
   try {
     const supabase = await createServerClient()
     const { data: auth, error: authError } = await supabase.auth.getUser()
-    if (authError || !auth?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-
-    const portfolio = await ensureOwnership(supabase, params.id)
-    if (!portfolio) return NextResponse.json({ error: "Not found" }, { status: 404 })
-
-    const tickers = await loadTickers(supabase, params.id)
-    if (tickers.length === 0) return NextResponse.json({ error: "No holdings" }, { status: 400 })
-
-    const generated = await generateResearchViaInternalAPI(request, params.id, tickers, portfolio.name ?? null)
-    const meta = {
-      ...(generated.metadata ?? {}),
-      lookbackDays: STALE_AFTER_DAYS,
+    if (authError || !auth?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
-    const toPersist = await persistResearch(supabase, params.id, {
-      research: {
-        realTimeNews: generated.realTimeNews,
-        riskAndScenarioModeling: generated.riskAndScenarioModeling,
-        fundamentalComparative: generated.fundamentalComparative,
-      },
-      recommendations: generated.recommendations ?? [],
-      meta,
-    })
+
+    const ownership = await ensurePortfolioOwnership(supabase, params.id, auth.user.id)
+    if (!ownership) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 })
+    }
+
+    const tickers = await loadHoldingsTickers(supabase, params.id)
+    if (!tickers.length) {
+      return NextResponse.json({
+        tickers: [],
+        result: "",
+        generatedAt: new Date().toISOString(),
+      })
+    }
+
+    const workflowResult = await runChatKitWorkflow(tickers)
 
     return NextResponse.json({
-      report: toPersist.research,
-      recommendations: toPersist.recommendations || [],
-      metadata: toPersist.meta || meta,
-      persisted: true,
-      created_at: toPersist.created_at,
+      tickers,
+      result: workflowResult.text,
+      generatedAt: new Date().toISOString(),
+      meta: {
+        tickerCount: tickers.length,
+        workflowId: process.env.CHATKIT_WORKFLOW_ID,
+        workflowVersion: process.env.CHATKIT_WORKFLOW_VERSION ?? "production",
+        runId: workflowResult.runId,
+        status: workflowResult.status,
+      },
     })
-  } catch (err) {
-    console.error("Error refreshing research:", err)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+  } catch (error) {
+    console.error("[research] route error", error)
+    return NextResponse.json({ error: "Failed to generate research" }, { status: 500 })
   }
+}
+
+export async function GET(request: NextRequest, context: { params: { id: string } }) {
+  return handleRequest(request, context.params)
+}
+
+export async function POST(request: NextRequest, context: { params: { id: string } }) {
+  return handleRequest(request, context.params)
 }

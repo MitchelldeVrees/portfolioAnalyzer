@@ -13,8 +13,8 @@ import { formatDistanceToNow } from "date-fns"
 import { PerformanceChart } from "./performance-chart"
 import { AllocationChart } from "./allocation-chart"
 import { HoldingsAnalysis } from "./holdings-analysis"
-import { NewsResearch } from "./news-research"
 import { PortfolioSummaryReport } from "./portfolio-summary-report"
+import { PortfolioResearch } from "./portfolio-research"
 import { useEffect, useState, useRef } from "react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 interface PortfolioHolding {
@@ -131,11 +131,6 @@ export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHo
   return "text-red-600 dark:text-red-400"; // Poor
 };
 
-
-  // Pre-generate research on first load so it's ready when opening the tab
-  useEffect(() => {
-    fetch(`/api/portfolio/${portfolio.id}/research`).catch(() => {})
-  }, [portfolio.id])
 
   if (loading) {
     return (
@@ -574,7 +569,7 @@ export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHo
         </TabsContent>
 
         <TabsContent value="research">
-          <NewsResearch portfolioId={portfolio.id} />
+          <PortfolioResearch portfolioId={portfolio.id} />
         </TabsContent>
 
         <TabsContent value="report">
@@ -599,8 +594,6 @@ export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHo
     </div>
   )
 }
-
-
 
 
 
