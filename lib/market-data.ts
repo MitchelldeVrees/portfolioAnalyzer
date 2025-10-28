@@ -32,6 +32,58 @@ const DEFAULT_HEADERS = {
   Accept: "application/json,text/plain,*/*",
 }
 
+type ProviderName = "finnhub" | "yahoo" | "stooq"
+type ProviderOp = "quote" | "history" | "csv"
+
+type ProviderMetricEntry = {
+  count: number
+  errors: number
+  totalLatency: number
+  lastLatency: number
+}
+
+const providerMetrics: Record<string, ProviderMetricEntry> = {}
+
+function recordProviderMetric(
+  provider: ProviderName,
+  operation: ProviderOp,
+  success: boolean,
+  durationMs: number,
+  extra?: Record<string, unknown>,
+) {
+  const key = `${provider}:${operation}`
+  const entry = providerMetrics[key] ?? {
+    count: 0,
+    errors: 0,
+    totalLatency: 0,
+    lastLatency: 0,
+  }
+
+  entry.count += 1
+  entry.totalLatency += durationMs
+  entry.lastLatency = durationMs
+  if (!success) entry.errors += 1
+  providerMetrics[key] = entry
+
+  const avgLatency = entry.totalLatency / entry.count
+  const payload = {
+    provider,
+    operation,
+    status: success ? "success" : "error",
+    durationMs: Math.round(durationMs),
+    count: entry.count,
+    errors: entry.errors,
+    avgLatencyMs: Math.round(avgLatency),
+    ...(extra ?? {}),
+  }
+
+  if (success) {
+    console.info("[market-data]", payload)
+  } else {
+    console.error("[market-data]", payload)
+  }
+}
+
 // ---------- Utils ----------
 function asNumber(x: any, def = NaN) {
   const n = Number(x)
@@ -77,42 +129,72 @@ function stooqCandidateSymbols(sym: string): string[] {
 // ---------- Finnhub (optional) ----------
 async function finnhubQuote(symbol: string): Promise<Quote | null> {
   if (!FINNHUB_API_KEY) return null
+  const start = Date.now()
   const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_API_KEY}`
-  const res = await fetch(url)
-  if (!res.ok) return null
-  const j = await res.json()
-  const price = asNumber(j.c)
-  const prev = asNumber(j.pc)
-  if (!Number.isFinite(price) || !Number.isFinite(prev) || prev === 0) return null
-  const change = price - prev
-  const changePercent = (change / prev) * 100
-  return { price, change, changePercent }
+  try {
+    const res = await fetch(url)
+    if (!res.ok) {
+      recordProviderMetric("finnhub", "quote", false, Date.now() - start, { status: res.status })
+      return null
+    }
+    const j = await res.json()
+    const price = asNumber(j.c)
+    const prev = asNumber(j.pc)
+    if (!Number.isFinite(price) || !Number.isFinite(prev) || prev === 0) {
+      recordProviderMetric("finnhub", "quote", false, Date.now() - start, { reason: "invalid-data" })
+      return null
+    }
+    const change = price - prev
+    const changePercent = (change / prev) * 100
+    recordProviderMetric("finnhub", "quote", true, Date.now() - start, { symbol })
+    return { price, change, changePercent }
+  } catch (error) {
+    recordProviderMetric("finnhub", "quote", false, Date.now() - start, { error: (error as Error)?.message })
+    throw error
+  }
 }
 
 async function finnhubHistoryMonthly(symbol: string, months = 12): Promise<OHLCPoint[] | null> {
   if (!FINNHUB_API_KEY) return null
+  const start = Date.now()
   // Resolution M (monthly) isn't always available; use D and sample by month.
   const now = Math.floor(Date.now() / 1000)
   const yearAgo = now - 400 * 24 * 60 * 60
   const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(
     symbol,
   )}&resolution=D&from=${yearAgo}&to=${now}&token=${FINNHUB_API_KEY}`
-  const res = await fetch(url)
-  if (!res.ok) return null
-  const j = await res.json()
-  if (j.s !== "ok" || !Array.isArray(j.t) || !Array.isArray(j.c)) return null
-  // Collapse to month-end closes
-  const byMonth = new Map<string, number>()
-  for (let i = 0; i < j.t.length; i++) {
-    const yyyymm = toYYYYMM(j.t[i])
-    byMonth.set(yyyymm, j.c[i])
+  try {
+    const res = await fetch(url)
+    if (!res.ok) {
+      recordProviderMetric("finnhub", "history", false, Date.now() - start, { status: res.status })
+      return null
+    }
+    const j = await res.json()
+    if (j.s !== "ok" || !Array.isArray(j.t) || !Array.isArray(j.c)) {
+      recordProviderMetric("finnhub", "history", false, Date.now() - start, { reason: "invalid-data" })
+      return null
+    }
+    // Collapse to month-end closes
+    const byMonth = new Map<string, number>()
+    for (let i = 0; i < j.t.length; i++) {
+      const yyyymm = toYYYYMM(j.t[i])
+      byMonth.set(yyyymm, j.c[i])
+    }
+    const arr = Array.from(byMonth.entries())
+      .map(([date, close]) => ({ date, close: asNumber(close) }))
+      .filter(p => Number.isFinite(p.close))
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(-months)
+    if (arr.length) {
+      recordProviderMetric("finnhub", "history", true, Date.now() - start, { symbol, points: arr.length })
+      return arr
+    }
+    recordProviderMetric("finnhub", "history", false, Date.now() - start, { reason: "empty" })
+    return null
+  } catch (error) {
+    recordProviderMetric("finnhub", "history", false, Date.now() - start, { error: (error as Error)?.message })
+    throw error
   }
-  const arr = Array.from(byMonth.entries())
-    .map(([date, close]) => ({ date, close: asNumber(close) }))
-    .filter(p => Number.isFinite(p.close))
-    .sort((a, b) => a.date.localeCompare(b.date))
-    .slice(-months)
-  return arr.length ? arr : null
 }
 
 // ---------- Yahoo ----------
@@ -120,63 +202,96 @@ async function yahooQuotesBatch(symbols: string[]): Promise<Record<string, Quote
   if (!symbols.length) return {}
   const unique = Array.from(new Set(symbols.map(s => s.trim()).filter(Boolean)))
   const url = `${YF_BASE}/v7/finance/quote?symbols=${encodeURIComponent(unique.join(","))}`
-  const res = await fetch(url, { headers: DEFAULT_HEADERS })
-  if (!res.ok) return null
-  const json = await res.json()
-  const results: any[] = json?.quoteResponse?.result ?? []
+  const start = Date.now()
+  try {
+    const res = await fetch(url, { headers: DEFAULT_HEADERS })
+    if (!res.ok) {
+      recordProviderMetric("yahoo", "quote", false, Date.now() - start, { status: res.status })
+      return null
+    }
+    const json = await res.json()
+    const results: any[] = json?.quoteResponse?.result ?? []
 
-  const out: Record<string, Quote> = Object.fromEntries(
-    unique.map(sym => [
-      sym,
-      {
-        price: 100,
-        change: 0,
-        changePercent: 0,
-      },
-    ]),
-  )
+    const out: Record<string, Quote> = Object.fromEntries(
+      unique.map(sym => [
+        sym,
+        {
+          price: 100,
+          change: 0,
+          changePercent: 0,
+        },
+      ]),
+    )
 
-  for (const r of results) {
-    const sym = r?.symbol
-    if (!sym) continue
-    const price = asNumber(r.regularMarketPrice)
-    const change = asNumber(r.regularMarketChange, 0)
-    const changePercent = asNumber(r.regularMarketChangePercent, 0)
-    if (Number.isFinite(price)) {
-      out[sym] = {
-        price,
-        change: Number.isFinite(change) ? change : 0,
-        changePercent: Number.isFinite(changePercent) ? changePercent : 0,
-        marketCap: asNumber(r.marketCap),
-        pe: asNumber(r.trailingPE),
-        dividend: asNumber(r.trailingAnnualDividendRate),
-        beta: asNumber(r.beta) || asNumber(r.beta3Year),
+    for (const r of results) {
+      const sym = r?.symbol
+      if (!sym) continue
+      const price = asNumber(r.regularMarketPrice)
+      const change = asNumber(r.regularMarketChange, 0)
+      const changePercent = asNumber(r.regularMarketChangePercent, 0)
+      if (Number.isFinite(price)) {
+        out[sym] = {
+          price,
+          change: Number.isFinite(change) ? change : 0,
+          changePercent: Number.isFinite(changePercent) ? changePercent : 0,
+          marketCap: asNumber(r.marketCap),
+          pe: asNumber(r.trailingPE),
+          dividend: asNumber(r.trailingAnnualDividendRate),
+          beta: asNumber(r.beta) || asNumber(r.beta3Year),
+        }
       }
     }
-  }
 
-  return out
+    recordProviderMetric("yahoo", "quote", true, Date.now() - start, {
+      requested: unique.length,
+      received: results.length,
+    })
+    return out
+  } catch (error) {
+    recordProviderMetric("yahoo", "quote", false, Date.now() - start, { error: (error as Error)?.message })
+    throw error
+  }
 }
 
 async function yahooHistoryMonthlyClose(symbol: string, months = 12): Promise<OHLCPoint[] | null> {
   const url = `${YF_BASE}/v8/finance/chart/${encodeURIComponent(
     symbol,
   )}?range=1y&interval=1mo&includeAdjustedClose=true`
-  const res = await fetch(url, { headers: DEFAULT_HEADERS })
-  if (!res.ok) return null
-  const json = await res.json()
-  const result = json?.chart?.result?.[0]
-  if (!result) return null
-  const ts: number[] = result?.timestamp || []
-  const adj = result?.indicators?.adjclose?.[0]?.adjclose
-  const cls = result?.indicators?.quote?.[0]?.close
-  const closes: number[] = Array.isArray(adj) ? adj : Array.isArray(cls) ? cls : []
-  if (!ts.length || !closes.length) return null
-  const points: OHLCPoint[] = ts
-    .map((t, i) => ({ date: toYYYYMM(t), close: asNumber(closes[i]) }))
-    .filter(p => Number.isFinite(p.close))
-    .slice(-months)
-  return points.length ? points : null
+  const start = Date.now()
+  try {
+    const res = await fetch(url, { headers: DEFAULT_HEADERS })
+    if (!res.ok) {
+      recordProviderMetric("yahoo", "history", false, Date.now() - start, { status: res.status })
+      return null
+    }
+    const json = await res.json()
+    const result = json?.chart?.result?.[0]
+    if (!result) {
+      recordProviderMetric("yahoo", "history", false, Date.now() - start, { reason: "no-result" })
+      return null
+    }
+    const ts: number[] = result?.timestamp || []
+    const adj = result?.indicators?.adjclose?.[0]?.adjclose
+    const cls = result?.indicators?.quote?.[0]?.close
+    const closes: number[] = Array.isArray(adj) ? adj : Array.isArray(cls) ? cls : []
+    if (!ts.length || !closes.length) {
+      recordProviderMetric("yahoo", "history", false, Date.now() - start, { reason: "empty-series" })
+      return null
+    }
+    const points: OHLCPoint[] = ts
+      .map((t, i) => ({ date: toYYYYMM(t), close: asNumber(closes[i]) }))
+      .filter(p => Number.isFinite(p.close))
+      .slice(-months)
+    if (!points.length) {
+      recordProviderMetric("yahoo", "history", false, Date.now() - start, { reason: "filtered-empty" })
+      return null
+    }
+    recordProviderMetric("yahoo", "history", true, Date.now() - start, { symbol, points: points.length })
+    return points
+  } catch (error) {
+    recordProviderMetric("yahoo", "history", false, Date.now() - start, { error: (error as Error)?.message })
+    throw error
+  }
 }
 
 // ---------- Stooq (CSV) ----------
@@ -209,28 +324,55 @@ function parseStooqCsvToPoints(csv: string, limit = 500): { d: string; c: number
 }
 
 async function stooqQuote(symbol: string): Promise<Quote | null> {
-  // Use daily CSV; compute change from last two rows
-  const csv = await stooqFetchCsv(symbol, "d")
-  if (!csv) return null
-  const pts = parseStooqCsvToPoints(csv, 10)
-  const lastPt = last(pts)
-  const prevPt = pts.length >= 2 ? pts[pts.length - 2] : undefined
-  if (!lastPt || !prevPt) return null
-  const price = lastPt.c
-  const change = price - prevPt.c
-  const changePercent = prevPt.c ? (change / prevPt.c) * 100 : 0
-  return { price, change, changePercent }
+  const start = Date.now()
+  try {
+    // Use daily CSV; compute change from last two rows
+    const csv = await stooqFetchCsv(symbol, "d")
+    if (!csv) {
+      recordProviderMetric("stooq", "quote", false, Date.now() - start, { reason: "no-csv" })
+      return null
+    }
+    const pts = parseStooqCsvToPoints(csv, 10)
+    const lastPt = last(pts)
+    const prevPt = pts.length >= 2 ? pts[pts.length - 2] : undefined
+    if (!lastPt || !prevPt) {
+      recordProviderMetric("stooq", "quote", false, Date.now() - start, { reason: "insufficient-data" })
+      return null
+    }
+    const price = lastPt.c
+    const change = price - prevPt.c
+    const changePercent = prevPt.c ? (change / prevPt.c) * 100 : 0
+    recordProviderMetric("stooq", "quote", true, Date.now() - start, { symbol })
+    return { price, change, changePercent }
+  } catch (error) {
+    recordProviderMetric("stooq", "quote", false, Date.now() - start, { error: (error as Error)?.message })
+    throw error
+  }
 }
 
 async function stooqHistoryMonthly(symbol: string, months = 12): Promise<OHLCPoint[] | null> {
-  const csv = await stooqFetchCsv(symbol, "m")
-  if (!csv) return null
-  const pts = parseStooqCsvToPoints(csv, 60).map(p => ({
-    date: p.d.slice(0, 7),
-    close: p.c,
-  }))
-  const out = pts.slice(-months)
-  return out.length ? out : null
+  const start = Date.now()
+  try {
+    const csv = await stooqFetchCsv(symbol, "m")
+    if (!csv) {
+      recordProviderMetric("stooq", "history", false, Date.now() - start, { reason: "no-csv" })
+      return null
+    }
+    const pts = parseStooqCsvToPoints(csv, 60).map(p => ({
+      date: p.d.slice(0, 7),
+      close: p.c,
+    }))
+    const out = pts.slice(-months)
+    if (!out.length) {
+      recordProviderMetric("stooq", "history", false, Date.now() - start, { reason: "empty" })
+      return null
+    }
+    recordProviderMetric("stooq", "history", true, Date.now() - start, { symbol, points: out.length })
+    return out
+  } catch (error) {
+    recordProviderMetric("stooq", "history", false, Date.now() - start, { error: (error as Error)?.message })
+    throw error
+  }
 }
 
 // ---------- Public API ----------

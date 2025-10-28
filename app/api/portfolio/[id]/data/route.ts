@@ -2,6 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchQuotesBatch, fetchHistoryMonthlyClose } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
+import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
 
 // --- types ---
 type Holding = {
@@ -46,79 +47,6 @@ const DEFAULT_BENCH = "^GSPC"; // Yahoo supports ^GSPC, ^NDX, etc.
 // ---------- utils & helpers ----------
 function clamp(x: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, x));
-}
-
-// --------------------------------------
-// Sector helpers
-// --------------------------------------
-function getSectorForTicker(ticker: string): string {
-  const t = (ticker || "").toUpperCase().trim();
-  if (!t) return "Other";
-  const BUILTIN: Record<string, string> = {
-    AAPL: "Technology",
-    MSFT: "Technology",
-    GOOGL: "Technology",
-    NVDA: "Technology",
-    META: "Technology",
-    AMZN: "Consumer Discretionary",
-    TSLA: "Consumer Discretionary",
-    JPM: "Financial Services",
-    V: "Financial Services",
-    JNJ: "Healthcare",
-  };
-  if (BUILTIN[t]) return BUILTIN[t];
-
-  const hit = _sectorCache.get(t);
-  const now = Date.now();
-  if (hit && (now - hit.ts) < SECTOR_TTL_MS && typeof hit.sector === "string") {
-    return hit.sector;
-  }
-  if (!hit?.inflight) {
-    const inflight = _fetchSectorFromYahoo(t)
-      .then((sector) => {
-        _sectorCache.set(t, { sector: sector || "Other", ts: Date.now(), inflight: null });
-      })
-      .catch(() => {
-        _sectorCache.set(t, { sector: "Other", ts: Date.now(), inflight: null });
-      });
-    _sectorCache.set(t, { sector: hit?.sector ?? "Other", ts: hit?.ts ?? 0, inflight });
-  }
-  return "Other";
-}
-
-const SECTOR_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
-type SectorEntry = { sector: string; ts: number; inflight: Promise<void> | null };
-const _sectorCache: Map<string, SectorEntry> = new Map();
-
-async function _fetchSectorFromYahoo(ticker: string): Promise<string | null> {
-  try {
-    const qs: any = await yahooFinance.quoteSummary(ticker, {
-      modules: ["assetProfile", "summaryProfile", "price"],
-    });
-    const fromAsset = qs?.assetProfile?.sector;
-    const fromSummary = qs?.summaryProfile?.sector;
-    const quoteType = qs?.price?.quoteType || qs?.price?.quoteType?.raw;
-    const isETF = (typeof quoteType === "string") && quoteType.toUpperCase() === "ETF";
-    if (isETF) return "ETF";
-    const sector = (typeof fromAsset === "string" && fromAsset) || (typeof fromSummary === "string" && fromSummary);
-    return sector || null;
-  } catch {
-    return null;
-  }
-}
-
-export async function warmSectorCache(tickers: string[]) {
-  const uniq = Array.from(new Set((tickers || []).map(t => (t || "").toUpperCase().trim()).filter(Boolean)));
-  await Promise.all(
-    uniq.map(async (t) => {
-      const hit = _sectorCache.get(t);
-      const fresh = hit && (Date.now() - hit.ts) < SECTOR_TTL_MS && typeof hit.sector === "string";
-      if (!fresh) {
-        const s = await _fetchSectorFromYahoo(t);
-        _sectorCache.set(t, { sector: s || "Other", ts: Date.now(), inflight: null });
-      }
-    })
-  );
 }
 
 // --------------------------------------
@@ -328,6 +256,19 @@ function getSectorColor(sector: string): string {
     "etf": "#334155",
     "fund": "#334155",
     "index fund": "#334155",
+    "fixed income": "#0ea5e9",
+    "government bonds": "#1d4ed8",
+    "municipal bonds": "#14b8a6",
+    "corporate bonds": "#0d9488",
+    "mortgage-backed securities": "#0891b2",
+    "commodities": "#b45309",
+    "infrastructure": "#475569",
+    "emerging markets": "#f97316",
+    "cash & cash equivalents": "#10b981",
+    "currency": "#2563eb",
+    "digital assets": "#a855f7",
+    "index": "#334155",
+    "mutual fund": "#334155",
     "other": "#6b7280",
   };
   for (const [k, color] of Object.entries(MAP)) {
@@ -350,7 +291,29 @@ function estimateBeta(portfolio: number[], benchmark: number[]): number { const 
 function hhi(weights: number[]) { return weights.reduce((s, w) => s + w * w, 0); }
 function effectiveHoldings(weights: number[]) { const _hhi = hhi(weights); return _hhi > 0 ? 1 / _hhi : 0; }
 function computeConcentration(weights: number[]) { const pct = weights.map((w) => w * 100); const largest = Math.max(...pct); const sorted = pct.slice().sort((a, b) => b - a); const top2 = (sorted[0] || 0) + (sorted[1] || 0); const _hhi = hhi(weights); const level = largest >= 20 || top2 >= 40 || _hhi >= 0.18 ? "High" : largest >= 12 || top2 >= 25 || _hhi >= 0.10 ? "Medium" : "Low"; return { level, largestPositionPct: Number(largest.toFixed(1)), top2Pct: Number(top2.toFixed(1)), hhi: Number(_hhi.toFixed(3)), effectiveHoldings: Number(effectiveHoldings(weights).toFixed(1)), }; }
-function computeDiversification(weights: number[], tickers: string[]) { const sectorAgg: Record<string, number> = {}; tickers.forEach((t, i) => { const s = getSectorForTicker(t); sectorAgg[s] = (sectorAgg[s] || 0) + weights[i]; }); const sectorWeights = Object.values(sectorAgg); const sectorHHI = hhi(sectorWeights); const sorted = weights.slice().sort((a, b) => b - a); const top2 = (sorted[0] || 0) + (sorted[1] || 0); const Neff = effectiveHoldings(weights); const breadthScore = clamp((Neff - 5) / (15 - 5), 0, 1); const sectorEven = clamp((0.25 - sectorHHI) / (0.25 - 0.10), 0, 1); const top2Score = clamp((0.40 - top2) / (0.40 - 0.20), 0, 1); const score = 10 * (0.5 * breadthScore + 0.3 * sectorEven + 0.2 * top2Score); return { score: Number(score.toFixed(1)), holdings: tickers.length, top2Pct: Number((top2 * 100).toFixed(1)), sectorHHI: Number(sectorHHI.toFixed(3)), effectiveHoldings: Number(Neff.toFixed(1)), }; }
+function computeDiversification(weights: number[], tickers: string[]) {
+  const sectorAgg: Record<string, number> = {};
+  tickers.forEach((t, i) => {
+    const s = sectorForTicker(t);
+    sectorAgg[s] = (sectorAgg[s] || 0) + weights[i];
+  });
+  const sectorWeights = Object.values(sectorAgg);
+  const sectorHHI = hhi(sectorWeights);
+  const sorted = weights.slice().sort((a, b) => b - a);
+  const top2 = (sorted[0] || 0) + (sorted[1] || 0);
+  const Neff = effectiveHoldings(weights);
+  const breadthScore = clamp((Neff - 5) / (15 - 5), 0, 1);
+  const sectorEven = clamp((0.25 - sectorHHI) / (0.25 - 0.10), 0, 1);
+  const top2Score = clamp((0.40 - top2) / (0.40 - 0.20), 0, 1);
+  const score = 10 * (0.5 * breadthScore + 0.3 * sectorEven + 0.2 * top2Score);
+  return {
+    score: Number(score.toFixed(1)),
+    holdings: tickers.length,
+    top2Pct: Number((top2 * 100).toFixed(1)),
+    sectorHHI: Number(sectorHHI.toFixed(3)),
+    effectiveHoldings: Number(Neff.toFixed(1)),
+  };
+}
 
 // ---------- Yahoo helpers ----------
 async function fetchYahooBeta(symbol: string): Promise<number | null> { try { const qs: any = await yahooFinance.quoteSummary(symbol, { modules: ["defaultKeyStatistics"] }); const b = qs?.defaultKeyStatistics?.beta; if (typeof b === "number") return b; if (b && typeof b?.raw === "number") return b.raw; return null; } catch { return null; } }
@@ -458,7 +421,11 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
 
   const symbols = holdings.map((h) => h.ticker);
   const quotesMap = await fetchQuotesBatch(symbols);
-  await warmSectorCache(symbols); // async, don't await
+  try {
+    await ensureSectors(symbols);
+  } catch (error) {
+    console.warn("[analysis] sector preload failed", (error as Error)?.message ?? error);
+  }
 
   let riskFree = 0.05;
   try {
@@ -482,7 +449,7 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
 
   const sectorAgg: Record<string, number> = {};
   for (const h of holdingsData) {
-    const sector = getSectorForTicker(h.ticker);
+    const sector = sectorForTicker(h.ticker);
     sectorAgg[sector] = (sectorAgg[sector] || 0) + (h.totalValue / (totalValue || 1)) * 100;
   }
   const sectors = Object.entries(sectorAgg).map(([sector, allocation]) => ({
@@ -553,34 +520,54 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
     if (portfolioRaw.length > 1 && benchmarkRaw.length > 1) {
       const baseP = portfolioRaw[0];
       const baseB = benchmarkRaw[0];
-      const normP = portfolioRaw.map((v) => (v / baseP) * 100);
-      const normB = benchmarkRaw.map((v) => (v / baseB) * 100);
+
+      const portfolioNorm = portfolioRaw.map((v) => (baseP !== 0 ? v / baseP : 0));
+      const benchmarkNorm = benchmarkRaw.map((v) => (baseB !== 0 ? v / baseB : 0));
 
       performance = dates.map((date, i) => ({
         date,
-        portfolio: Number(normP[i]?.toFixed(2)),
-        benchmark: Number(normB[i]?.toFixed(2)),
+        portfolio: Number((portfolioNorm[i] * 100).toFixed(2)),
+        benchmark: Number((benchmarkNorm[i] * 100).toFixed(2)),
       }));
 
-      vol = annualizedVolatility(normP.map((v) => v / 100)) * 100;
-      beta = estimateBeta(normP, normB);
-      mdd = maxDrawdown(normP.map((v) => v / 100)) * 100;
+      vol = annualizedVolatility(portfolioNorm) * 100;
+      beta = estimateBeta(portfolioNorm, benchmarkNorm);
+      mdd = maxDrawdown(portfolioNorm) * 100;
 
-      const retsMonthly = pctReturns(normP);
-      const avgMonthly = mean(retsMonthly);
-      const annualRet = avgMonthly * 12;
+      const monthlyReturns = pctReturns(portfolioNorm);
+      const periods = monthlyReturns.length;
+      const cumulativeReturn =
+        portfolioNorm.length >= 2 && portfolioNorm[0] !== 0
+          ? portfolioNorm[portfolioNorm.length - 1] / portfolioNorm[0] - 1
+          : 0;
+      const annualRet =
+        periods > 0
+          ? Math.pow(1 + cumulativeReturn, Math.max(12 / periods, 1)) - 1
+          : 0;
       const volAnnual = vol / 100;
       sharpe = volAnnual > 0 ? (annualRet - riskFree) / volAnnual : 0;
 
-      const mar = 0;
-      const downsideDevs = retsMonthly.map((r) => Math.pow(Math.min(0, r - mar), 2));
-      const downsideVar = mean(downsideDevs);
+      const targetMonthly = riskFree / 12;
+      const downsideDiffs = monthlyReturns.map((r) => Math.min(0, r - targetMonthly));
+      const negatives = downsideDiffs.filter((r) => r < 0);
+      const downsideVar = negatives.length
+        ? negatives.reduce((acc, r) => acc + r * r, 0) / negatives.length
+        : 0;
       const downsideDevMonthly = Math.sqrt(downsideVar);
       const downsideDevAnnual = downsideDevMonthly * Math.sqrt(12);
-      sortino = downsideDevAnnual > 0 ? (annualRet - riskFree) / downsideDevAnnual : 0;
+      sortino = downsideDevAnnual > 1e-6 ? (annualRet - riskFree) / downsideDevAnnual : 0;
 
-      benchRet = Number((((normB.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
-      historicalPortfolioReturn = Number((((normP.at(-1) ?? 100) / 100 - 1) * 100).toFixed(2));
+      const benchCum =
+        benchmarkNorm.length >= 2 && benchmarkNorm[0] !== 0
+          ? benchmarkNorm[benchmarkNorm.length - 1] / benchmarkNorm[0] - 1
+          : 0;
+      const portCum =
+        portfolioNorm.length >= 2 && portfolioNorm[0] !== 0
+          ? portfolioNorm[portfolioNorm.length - 1] / portfolioNorm[0] - 1
+          : 0;
+
+      benchRet = Number((benchCum * 100).toFixed(2));
+      historicalPortfolioReturn = Number((portCum * 100).toFixed(2));
     } else {
       console.warn(`Insufficient history data for benchmark ${userBenchmark}`);
     }

@@ -4,6 +4,14 @@ import type React from "react"
 import { useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { createClient } from "@/lib/supabase/client"
+import {
+  buildInitialColumnMappings,
+  buildTickerCandidateList,
+  detectIdentifierColumns,
+  type ColumnMappings,
+  type IdentifierColumnGuesses,
+  type HoldingIdentifiers,
+} from "@/lib/upload-parsing"
 import { Button } from "@/components/ui/button"
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -64,6 +72,7 @@ export function PortfolioUploadForm() {
         if (result.holdings.length > 0) {
           setParsedData(result.holdings)
           setError(null)
+          setResolutionSummary(null)
         } else {
           setParsedData(null)
           setError("No valid holdings found in the file.")
@@ -79,7 +88,7 @@ export function PortfolioUploadForm() {
       setParsedData(null)
       setParseResult(null)
     }
-  }, [mappings, fileContent, isCSV])
+  }, [mappings, fileContent, isCSV, identifierColumns])
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0]
@@ -95,6 +104,7 @@ export function PortfolioUploadForm() {
         shares: "",
         purchasePrice: "",
       })
+      setIdentifierColumns({})
       setFileContent("")
       setIsCSV(false)
       setParseResult(null)
@@ -107,13 +117,14 @@ export function PortfolioUploadForm() {
 
     setIsLoading(true)
     setError(null)
+    setResolutionSummary(null)
 
     try {
       const content = await file.text()
       setFileContent(content)
 
       if (file.name.endsWith(".csv") || file.type === "text/csv") {
-        const lines = content.trim().split("\n")
+        const lines = content.trim().split(/\r?\n/)
         if (lines.length < 1) {
           throw new Error("Empty file.")
         }
@@ -187,36 +198,44 @@ export function PortfolioUploadForm() {
         const parsed = lines
           .map((line) => {
             const parts = line.trim().split(/[,\s]+/)
+            const rawTicker = parts[0]?.trim() ?? ""
+            if (!rawTicker) return null
+            const tickerCandidates = buildTickerCandidateList(rawTicker)
             const holding: ParsedHolding = {
-              ticker: parts[0]?.toUpperCase() ?? "",
+              rowNumber: index + 1,
+              rawTicker,
+              ticker: tickerCandidates.primary ?? rawTicker.toUpperCase(),
+              candidates: tickerCandidates.candidates,
+              identifiers: {},
             }
             if (parts[1]) {
               const weight = Number.parseFloat(parts[1].replace("%", ""))
-              if (!isNaN(weight)) {
+              if (!Number.isNaN(weight)) {
                 holding.weight = weight > 1 ? weight / 100 : weight
               }
             }
             if (parts[2]) {
               const price = Number.parseFloat(parts[2].replace("$", ""))
-              if (!isNaN(price)) {
+              if (!Number.isNaN(price)) {
                 holding.purchasePrice = price
               }
             }
             if (parts[3]) {
               const shares = Number.parseFloat(parts[3])
-              if (!isNaN(shares)) {
+              if (!Number.isNaN(shares)) {
                 holding.shares = shares
               }
             }
             return holding
           })
-          .filter((h) => h.ticker)
+          .filter((h): h is ParsedHolding => Boolean(h))
         if (parsed.length === 0) {
           throw new Error("No valid holdings found in the file.")
         }
         setParsedData(parsed)
         setShowPreview(true)
         setIsCSV(false)
+        setIdentifierColumns({})
       } else {
         throw new Error("Unsupported file type. Please upload CSV or TXT files.")
       }
@@ -232,12 +251,102 @@ export function PortfolioUploadForm() {
 
     setIsLoading(true)
     setError(null)
+    setResolutionSummary(null)
 
     try {
       const {
         data: { user },
       } = await supabase.auth.getUser()
       if (!user) throw new Error("Not authenticated")
+
+      const resolverResponse = await fetch("/api/tickers/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          holdings: parsedData.map((holding) => ({
+            rowNumber: holding.rowNumber,
+            rawTicker: holding.rawTicker,
+            ticker: holding.ticker,
+            candidates: holding.candidates,
+            identifiers: holding.identifiers,
+          })),
+        }),
+      })
+
+      const resolverPayload = await resolverResponse
+        .json()
+        .catch(() => ({ error: "Failed to resolve tickers" }))
+
+      if (!resolverResponse.ok || (resolverPayload as any)?.error) {
+        const message =
+          typeof (resolverPayload as any)?.error === "string"
+            ? (resolverPayload as any).error
+            : "Failed to resolve tickers"
+        throw new Error(message)
+      }
+
+      const resolution = resolverPayload as TickerResolutionResponse
+      const resolvedRecords = Array.isArray(resolution.resolved) ? resolution.resolved : []
+      const unresolvedRecords = Array.isArray(resolution.unresolved) ? resolution.unresolved : []
+
+      const resolutionByRow = new Map<number, TickerResolutionRecord>()
+      resolvedRecords.forEach((record) => {
+        resolutionByRow.set(record.rowNumber, record)
+      })
+
+      const normalizedHoldings = parsedData.map((holding) => {
+        const resolved = resolutionByRow.get(holding.rowNumber)
+        if (!resolved) {
+          return { ...holding, resolution: undefined }
+        }
+
+        return {
+          ...holding,
+          ticker: resolved.resolvedTicker,
+          resolution: {
+            resolvedTicker: resolved.resolvedTicker,
+            source: resolved.source,
+            confidence: resolved.confidence,
+            usedIdentifier: resolved.usedIdentifier,
+            note: resolved.note,
+          },
+        }
+      })
+
+      setParsedData(normalizedHoldings)
+
+      if (unresolvedRecords.length > 0) {
+        const unresolvedSummary = unresolvedRecords
+          .map((record) => record.rawTicker || `row ${record.rowNumber}`)
+          .join(", ")
+        setError(
+          `Unable to resolve ticker(s): ${unresolvedSummary}. Adjust the column mapping or update your file and try again.`,
+        )
+        setIsLoading(false)
+        return
+      }
+
+      const sourceLabels: Record<string, string> = {
+        provided: "exact match",
+        candidate: "cleaned value",
+        isin: "via ISIN",
+        search: "via search",
+      }
+
+      const sourceCounts = resolvedRecords.reduce<Record<string, number>>((acc, record) => {
+        const key = record.source || "candidate"
+        acc[key] = (acc[key] || 0) + 1
+        return acc
+      }, {})
+
+      const summaryParts = Object.entries(sourceCounts).map(([source, count]) => {
+        const label = sourceLabels[source] || source
+        return `${count} ${label}`
+      })
+
+      if (summaryParts.length) {
+        setResolutionSummary(`Resolved ${resolvedRecords.length} tickers (${summaryParts.join(", ")}).`)
+      }
 
       // Create portfolio
       const { data: portfolio, error: portfolioError } = await supabase
