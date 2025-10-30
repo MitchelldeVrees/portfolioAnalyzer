@@ -90,6 +90,7 @@ async function runChatKitWorkflow(tickers: string[]): Promise<{ text: string; ru
     throw new Error("OPENAI_API_KEY is not configured")
   }
 
+  
   const version = process.env.CHATKIT_WORKFLOW_VERSION
   const joinedTickers = tickers.map((ticker) => ticker.toLowerCase()).join(", ")
 
