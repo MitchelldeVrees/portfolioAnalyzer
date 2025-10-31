@@ -19,6 +19,7 @@ const nextConfig = {
       '@gadicc/fetch-mock-cache/runtimes/deno.ts': false,
       '@gadicc/fetch-mock-cache/stores/fs.ts': false,
       '@std/testing/bdd': false,
+      '@std/testing/mock': false,
     };
 
     return config;
