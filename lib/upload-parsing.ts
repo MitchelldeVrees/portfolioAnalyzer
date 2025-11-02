@@ -163,6 +163,41 @@ export function normalizeHeaderKey(header: string): string {
   return header.toLowerCase().replace(/[^a-z0-9]/g, "")
 }
 
+function levenshteinDistance(a: string, b: string): number {
+  if (a === b) return 0
+  if (a.length === 0) return b.length
+  if (b.length === 0) return a.length
+
+  const previousRow = new Array<number>(b.length + 1)
+  const currentRow = new Array<number>(b.length + 1)
+
+  for (let j = 0; j <= b.length; j++) {
+    previousRow[j] = j
+  }
+
+  for (let i = 1; i <= a.length; i++) {
+    currentRow[0] = i
+    const aChar = a.charAt(i - 1)
+
+    for (let j = 1; j <= b.length; j++) {
+      const bChar = b.charAt(j - 1)
+      const cost = aChar === bChar ? 0 : 1
+
+      currentRow[j] = Math.min(
+        currentRow[j - 1] + 1,
+        previousRow[j] + 1,
+        previousRow[j - 1] + cost,
+      )
+    }
+
+    for (let j = 0; j <= b.length; j++) {
+      previousRow[j] = currentRow[j]
+    }
+  }
+
+  return previousRow[b.length]
+}
+
 function guessHeader(headers: string[], type: keyof ColumnMappings, exclude: Set<string>): string {
   if (!headers.length) return ""
   const normalized = headers.map((header) => ({
@@ -185,6 +220,11 @@ function guessHeader(headers: string[], type: keyof ColumnMappings, exclude: Set
 
   const startsWith = pick((value) => synonyms.some((syn) => value.startsWith(syn)))
   if (startsWith) return startsWith.original
+
+  const fuzzy = pick((value) =>
+    synonyms.some((syn) => levenshteinDistance(value, syn) <= Math.max(1, Math.floor(syn.length * 0.25))),
+  )
+  if (fuzzy) return fuzzy.original
 
   return ""
 }

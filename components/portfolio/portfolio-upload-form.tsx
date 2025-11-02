@@ -1,25 +1,29 @@
 "use client"
 
-import type React from "react"
-import { useState, useEffect } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import type { LucideIcon } from "lucide-react"
 import { createClient } from "@/lib/supabase/client"
 import {
   buildInitialColumnMappings,
   buildTickerCandidateList,
-  detectIdentifierColumns,
   type ColumnMappings,
-  type IdentifierColumnGuesses,
   type HoldingIdentifiers,
 } from "@/lib/upload-parsing"
-import { Button } from "@/components/ui/button"
-import { LoadingButton } from "@/components/ui/loading-button"
+import {
+  parseCSVContent,
+  validateHoldings,
+  detectDelimiter,
+  type ParsedHolding,
+} from "@/lib/csv-parser"
+import { cn } from "@/lib/utils"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
-import { Upload, AlertCircle, CheckCircle2, HelpCircle, FileText, Settings } from "lucide-react"
-import { Alert, AlertDescription } from "@/components/ui/alert"
+import { LoadingButton } from "@/components/ui/loading-button"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { TickerAutocomplete } from "@/components/portfolio/ticker-autocomplete"
 import {
   Select,
   SelectContent,
@@ -27,237 +31,898 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Badge } from "@/components/ui/badge"
-import { Separator } from "@/components/ui/separator"
-import { ColumnMappings, BLOOMBERG_FIELD_MAPPINGS, autoMapHeaders, getMappingsByCategory } from "@/lib/bloomberg-mapping"
-import { parseCSVContent, validateHoldings, ParsedHolding } from "@/lib/csv-parser"
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronDown,
+  Circle,
+  DownloadCloud,
+  FileText,
+  FileWarning,
+  RefreshCcw,
+  Sparkles,
+  Upload,
+} from "lucide-react"
 
-export function PortfolioUploadForm() {
+export type UploadStep = "upload" | "validate" | "review" | "import" | "complete"
+
+export type UploadHolding = ParsedHolding & {
+  rowNumber: number
+  rawTicker: string
+  candidates: string[]
+  identifiers: HoldingIdentifiers
+  resolution?: {
+    resolvedTicker: string
+    source?: string | null
+    confidence?: number | null
+    usedIdentifier?: string | null
+    note?: string | null
+  }
+}
+
+type TickerResolutionRecord = {
+  rowNumber: number
+  rawTicker: string
+  resolvedTicker: string
+  source: "provided" | "candidate" | "isin" | "search"
+  confidence: number
+  usedIdentifier?: string
+  note?: string
+  attempted?: string[]
+}
+
+type TickerResolutionIssue = {
+  rowNumber: number
+  rawTicker: string
+  reason: string
+  attempted?: string[]
+}
+
+type TickerResolutionResponse = {
+  resolved: TickerResolutionRecord[]
+  unresolved: TickerResolutionIssue[]
+}
+
+export type ReviewColumnKind = "ticker" | "number" | "percentage" | "currency" | "text" | "date"
+
+export type ReviewColumn = {
+  key: keyof ColumnMappings
+  label: string
+  kind: ReviewColumnKind
+}
+
+export type ReviewCardProps = {
+  parsedData: UploadHolding[]
+  parseResult: { errors: string[]; warnings: string[] } | null
+  errorCount: number
+  warningCount: number
+  errorMessage?: string | null
+  canImport: boolean
+  isImporting: boolean
+  onReset: () => void
+  onDownloadIssues: () => void
+  onImport: () => void
+  currentStep: UploadStep
+  columns: ReviewColumn[]
+  onChangeHolding: (rowIndex: number, column: ReviewColumn, value: string) => void
+}
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024 // 10 MB
+
+const STEP_SEQUENCE: Array<{ id: Exclude<UploadStep, "complete">; label: string; description: string; Icon: LucideIcon }> = [
+  { id: "upload", label: "Upload", description: "Add your CSV file", Icon: Upload },
+  { id: "validate", label: "Validate", description: "Detect headers & mapping", Icon: Upload },
+  { id: "review", label: "Review", description: "Inspect holdings & warnings", Icon: FileText },
+  { id: "import", label: "Import", description: "Create portfolio in Portify", Icon: Sparkles },
+]
+
+interface PortfolioUploadFormProps {
+  portfolioName: string
+  portfolioDescription: string
+  onPortfolioNameChange?: (value: string) => void
+  onPortfolioDescriptionChange?: (value: string) => void
+  onStepChange?: (step: UploadStep) => void
+  onReviewContentChange?: (review: ReviewCardProps | null) => void
+}
+
+function formatFileSize(bytes: number): string {
+  if (!bytes) return "0 B"
+  const units = ["B", "KB", "MB", "GB"]
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  const value = bytes / Math.pow(1024, exponent)
+  return `${value.toFixed(exponent === 0 ? 0 : 1)} ${units[exponent]}`
+}
+
+function formatCurrency(value: number | undefined): string {
+  if (value === undefined || Number.isNaN(value)) return "-"
+  return `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+function formatNumber(value: number | undefined): string {
+  if (value === undefined || Number.isNaN(value)) return "-"
+  return value.toLocaleString("en-US", { maximumFractionDigits: 2 })
+}
+
+function formatPercentage(value: number | undefined): string {
+  if (value === undefined || Number.isNaN(value)) return "-"
+  return `${(value * 100).toFixed(2)}%`
+}
+
+function extractRowNumberFromMessage(message: string): number | null {
+  const match = message.match(/row\s+(\d+)/i)
+  if (match) {
+    const parsed = Number.parseInt(match[1], 10)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function downloadIssueReport(errors: string[], warnings: string[]) {
+  const lines = [
+    "Portfolio upload issue report",
+    `Generated at: ${new Date().toISOString()}`,
+    "",
+    "Errors:",
+    ...(errors.length ? errors : ["None"]),
+    "",
+    "Warnings:",
+    ...(warnings.length ? warnings : ["None"]),
+    "",
+    "Tip: Fix the rows listed above and re-upload, or adjust column mapping.",
+  ]
+  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement("a")
+  anchor.href = url
+  anchor.download = "portify-portfolio-upload-issues.txt"
+  document.body.appendChild(anchor)
+  anchor.click()
+  document.body.removeChild(anchor)
+  URL.revokeObjectURL(url)
+}
+
+export function DefaultReviewCardContent({
+  parsedData,
+  parseResult,
+  errorCount,
+  warningCount,
+  canImport,
+  isImporting,
+  errorMessage,
+  onReset,
+  onDownloadIssues,
+  onImport,
+  columns,
+  onChangeHolding,
+}: ReviewCardProps) {
+  const totalHoldings = parsedData.length
+
+  const errorRows = useMemo(() => {
+    const set = new Set<number>()
+    parseResult?.errors.forEach((message) => {
+      const rowNumber = extractRowNumberFromMessage(message)
+      if (rowNumber) set.add(rowNumber)
+    })
+    return set
+  }, [parseResult])
+
+  const warningRows = useMemo(() => {
+    const set = new Set<number>()
+    parseResult?.warnings.forEach((message) => {
+      const rowNumber = extractRowNumberFromMessage(message)
+      if (rowNumber) set.add(rowNumber)
+    })
+    return set
+  }, [parseResult])
+
+  const getRowStatus = useCallback(
+    (rowNumber: number | undefined) => {
+      if (!rowNumber) return "valid"
+      if (errorRows.has(rowNumber)) return "error"
+      if (warningRows.has(rowNumber)) return "warning"
+      return "valid"
+    },
+    [errorRows, warningRows],
+  )
+
+  const renderEditableCell = useCallback(
+    (holding: UploadHolding, column: ReviewColumn, rowIndex: number) => {
+      const key = column.key as keyof UploadHolding
+      const rawValue = holding[key]
+      const handleChange = (value: string) => onChangeHolding(rowIndex, column, value)
+
+      switch (column.kind) {
+        case "ticker":
+          return (
+            <TickerAutocomplete
+              value={(holding.ticker ?? "").toUpperCase()}
+              onChange={handleChange}
+              placeholder="Select ticker"
+            />
+          )
+        case "percentage": {
+          const display = typeof rawValue === "number" ? (rawValue * 100).toString() : rawValue ? String(rawValue) : ""
+          return (
+            <Input
+              type="number"
+              step="0.01"
+              min="0"
+              value={display}
+              onChange={(event) => handleChange(event.target.value)}
+            />
+          )
+        }
+        case "currency": {
+          const display = rawValue ?? ""
+          return (
+            <Input
+              type="number"
+              step="0.01"
+              value={display !== null && display !== undefined ? String(rawValue) : ""}
+              onChange={(event) => handleChange(event.target.value)}
+            />
+          )
+        }
+        case "number": {
+          const display = rawValue !== null && rawValue !== undefined ? String(rawValue) : ""
+          return (
+            <Input
+              type="number"
+              step="0.001"
+              value={display}
+              onChange={(event) => handleChange(event.target.value)}
+            />
+          )
+        }
+        case "date": {
+          const display = rawValue ? String(rawValue).slice(0, 10) : ""
+          return <Input type="date" value={display} onChange={(event) => handleChange(event.target.value)} />
+        }
+        default: {
+          const display = rawValue ?? ""
+          return <Input value={display ? String(display) : ""} onChange={(event) => handleChange(event.target.value)} />
+        }
+      }
+    },
+    [onChangeHolding],
+  )
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Review summary</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {totalHoldings} holdings detected. Import cleans the valid rows and flags anything that needs attention.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Badge variant="secondary" className="bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-200">
+            Valid rows: {totalHoldings - warningCount}
+          </Badge>
+          {warningCount > 0 && (
+            <Badge variant="outline" className="border-amber-300 text-amber-600 dark:border-amber-400 dark:text-amber-300">
+              Warnings: {warningCount}
+            </Badge>
+          )}
+          {errorCount > 0 && <Badge variant="destructive">Errors: {errorCount}</Badge>}
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-slate-200 pb-4 dark:border-slate-800">
+        <div className="max-h-72 overflow-auto pb-4 pr-2">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 z-10 bg-slate-100 text-slate-600 dark:bg-slate-900 dark:text-slate-300">
+              <tr>
+                <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Row</th>
+                {columns.map((column) => (
+                  <th
+                    key={column.key as string}
+                    className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide"
+                  >
+                    {column.label}
+                  </th>
+                ))}
+                <th className="px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {parsedData.slice(0, 20).map((holding, index) => {
+                const status = getRowStatus(holding.rowNumber)
+                return (
+                  <tr
+                    key={`${holding.ticker}-${holding.rowNumber ?? index + 1}`}
+                    className="border-b border-slate-100 dark:border-slate-800/60"
+                  >
+                    <td className="px-3 py-2 text-xs text-slate-500 dark:text-slate-400">{index + 1}</td>
+                    {columns.map((column) => (
+                      <td key={`${column.key as string}-${index}`} className="px-3 py-2 align-middle">
+                        {renderEditableCell(holding, column, index)}
+                      </td>
+                    ))}
+                    <td className="px-3 py-2">
+                      <Badge
+                        variant={
+                          status === "error"
+                            ? "destructive"
+                            : status === "warning"
+                            ? "outline"
+                            : "secondary"
+                        }
+                        className={cn(
+                          "text-xs",
+                          status === "warning" &&
+                            "border-amber-300 text-amber-600 dark:border-amber-400 dark:text-amber-300",
+                          status === "valid" &&
+                            "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-200",
+                        )}
+                      >
+                        {status === "error" ? "Needs fix" : status === "warning" ? "Warning" : "Ready"}
+                      </Badge>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+        {parsedData.length > 20 && (
+          <div className="bg-slate-100 px-3 py-2 text-xs text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
+            Showing first 20 of {parsedData.length} rows.
+          </div>
+        )}
+      </div>
+
+      {parseResult && (parseResult.errors.length > 0 || parseResult.warnings.length > 0) && (
+        <div className="space-y-2">
+          {parseResult.errors.map((message, index) => (
+            <Alert key={`error-${index}`} variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{message}</AlertDescription>
+            </Alert>
+          ))}
+          {parseResult.warnings.map((message, index) => (
+            <Alert
+              key={`warning-${index}`}
+              variant="default"
+              className="border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/40 dark:bg-amber-900/20 dark:text-amber-200"
+            >
+              <FileWarning className="h-4 w-4" />
+              <AlertDescription>{message}</AlertDescription>
+            </Alert>
+          ))}
+        </div>
+      )}
+
+      {errorMessage && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Heads up</AlertTitle>
+          <AlertDescription>{errorMessage}</AlertDescription>
+        </Alert>
+      )}
+
+      {errorMessage && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Heads up</AlertTitle>
+          <AlertDescription>{errorMessage}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-4">
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={onReset}>
+            <RefreshCcw className="mr-2 h-4 w-4" />
+            Change file
+          </Button>
+         
+          
+        </div>
+
+        <LoadingButton
+          type="button"
+          onClick={onImport}
+          loading={isImporting}
+          loadingText="Importing portfolio…"
+          spinnerPlacement="start"
+          disabled={!canImport}
+        >
+          Import valid rows
+        </LoadingButton>
+      </div>
+    </div>
+  )
+}
+
+export function PortfolioUploadForm({
+  portfolioName,
+  portfolioDescription,
+  onPortfolioNameChange: _onPortfolioNameChange,
+  onPortfolioDescriptionChange: _onPortfolioDescriptionChange,
+  onStepChange,
+  onReviewContentChange,
+}: PortfolioUploadFormProps) {
+  const router = useRouter()
+  const supabase = createClient()
+
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const [currentStep, setCurrentStep] = useState<UploadStep>("upload")
   const [file, setFile] = useState<File | null>(null)
-  const [portfolioName, setPortfolioName] = useState("")
-  const [portfolioDescription, setPortfolioDescription] = useState("")
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [parsedData, setParsedData] = useState<ParsedHolding[] | null>(null)
-  const [showPreview, setShowPreview] = useState(false)
-  const [headers, setHeaders] = useState<string[]>([]) // Original case headers for display
-  const [mappings, setMappings] = useState<ColumnMappings>({
+  const [fileName, setFileName] = useState<string>("")
+  const [fileSize, setFileSize] = useState<number>(0)
+  const [isDragOver, setIsDragOver] = useState(false)
+  const [isCSV, setIsCSV] = useState(false)
+  const [fileContent, setFileContent] = useState<string>("")
+  const [headers, setHeaders] = useState<string[]>([])
+  const [mappings, setMappings] = useState<ColumnMappings>(() => ({
     ticker: "",
     weight: "",
     shares: "",
     purchasePrice: "",
-  })
-  const [fileContent, setFileContent] = useState<string>("") // Store file content to avoid re-reading
-  const [isCSV, setIsCSV] = useState(false)
+  }))
   const [parseResult, setParseResult] = useState<{ errors: string[]; warnings: string[] } | null>(null)
-  const [showAdvancedMapping, setShowAdvancedMapping] = useState(false)
-  const [selectedCategory, setSelectedCategory] = useState<string>("all")
+  const [parsedData, setParsedData] = useState<UploadHolding[]>([])
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [isBusy, setIsBusy] = useState(false)
+  const [isImporting, setIsImporting] = useState(false)
+  const [mappingOpen, setMappingOpen] = useState(false)
+  const [resolutionSummary, setResolutionSummary] = useState<string | null>(null)
+  const [createdPortfolio, setCreatedPortfolio] = useState<{ id: string; name: string } | null>(null)
+  const [detectedDelimiter, setDetectedDelimiter] = useState<string | null>(null)
+  const [encoding, setEncoding] = useState<string | null>(null)
+  const [uploadTime, setUploadTime] = useState<Date | null>(null)
 
-  const router = useRouter()
-  const supabase = createClient()
+  const revalidateHoldings = useCallback((holdings: UploadHolding[]) => {
+    if (!holdings.length) {
+      setParseResult({ errors: ["No holdings found"], warnings: [] })
+      return
+    }
+
+    const validation = validateHoldings(holdings)
+    const errors: string[] = []
+    const warnings: string[] = []
+
+    holdings.forEach((holding, index) => {
+      const rowLabel = holding.rowNumber ?? index + 1
+      if (!holding.ticker || !holding.ticker.trim()) {
+        errors.push(`Row ${rowLabel}: Ticker is required.`)
+      }
+      if (holding.weight !== undefined && holding.weight !== null && !Number.isFinite(holding.weight)) {
+        errors.push(`Row ${rowLabel}: Weight must be a number.`)
+      }
+    })
+
+    errors.push(...validation.errors)
+    warnings.push(...validation.warnings)
+
+    setParseResult({ errors, warnings })
+  }, [])
+
+  const columnMeta = useMemo(() => {
+    const meta: Partial<Record<keyof ColumnMappings, { label: string; kind: ReviewColumnKind }>> = {
+      ticker: { label: "Ticker", kind: "ticker" },
+      weight: { label: "Weight (%)", kind: "percentage" },
+      shares: { label: "Shares", kind: "number" },
+      purchasePrice: { label: "Purchase price", kind: "currency" },
+    }
+
+    return meta
+  }, [])
+
+  const editableColumns = useMemo<ReviewColumn[]>(() => {
+    const keys: Array<keyof ColumnMappings> = []
+    const add = (key: keyof ColumnMappings | undefined) => {
+      if (!key) return
+      if (keys.includes(key)) return
+      keys.push(key)
+    }
+
+    add("ticker")
+    if (mappings.weight) add("weight")
+    if (mappings.shares) add("shares")
+    if (mappings.purchasePrice) add("purchasePrice");
+
+    return keys.map((key) => {
+      const metaEntry = columnMeta[key] ?? { label: String(key), kind: "text" as ReviewColumnKind }
+      return { key, label: metaEntry.label, kind: metaEntry.kind }
+    })
+  }, [columnMeta, mappings])
+
+  const handleHoldingFieldChange = useCallback(
+    (rowIndex: number, column: ReviewColumn, rawValue: string) => {
+      setParsedData((previous) => {
+        const next = previous.map((holding, index) => {
+          if (index !== rowIndex) return holding
+
+          const updated: UploadHolding = { ...holding }
+          const key = column.key as keyof UploadHolding
+
+          switch (column.kind) {
+            case "ticker": {
+              const formatted = rawValue.toUpperCase().trim()
+              const candidates = buildTickerCandidateList(formatted || holding.rawTicker || "")
+              updated.ticker = formatted
+              updated.rawTicker = formatted
+              updated.candidates = candidates.candidates
+              break
+            }
+            case "percentage": {
+              const parsed = Number.parseFloat(rawValue)
+              updated.weight = Number.isFinite(parsed) ? parsed / 100 : undefined
+              break
+            }
+            case "currency":
+           case "number": {
+              const parsed = Number.parseFloat(rawValue)
+              ;(updated as any)[key] = Number.isFinite(parsed) ? parsed : undefined
+              break
+            }
+            case "date": {
+                ;(updated as any)[key] = rawValue ? rawValue : undefined
+                break
+              }
+            default: {
+              ;(updated as any)[key] = rawValue
+            }
+          }
+
+          return updated
+        })
+
+        revalidateHoldings(next)
+        return next
+      })
+    },
+    [revalidateHoldings],
+  )
 
   useEffect(() => {
-    if (fileContent && mappings.ticker && isCSV) {
-      setIsLoading(true)
-      try {
-        const result = parseCSVContent(fileContent, mappings)
-        const validation = validateHoldings(result.holdings)
-        
-        setParseResult({
-          errors: [...result.errors, ...validation.errors],
-          warnings: [...result.warnings, ...validation.warnings]
-        })
-        
-        if (result.holdings.length > 0) {
-          setParsedData(result.holdings)
-          setError(null)
-          setResolutionSummary(null)
-        } else {
-          setParsedData(null)
-          setError("No valid holdings found in the file.")
+    onStepChange?.(currentStep)
+  }, [currentStep, onStepChange])
+
+  const updateStep = useCallback((step: UploadStep) => {
+    setCurrentStep(step)
+  }, [])
+
+  const enrichHoldings = useCallback(
+    (holdings: ParsedHolding[]): UploadHolding[] => {
+      return holdings.map((holding, index) => {
+        const rawTicker = holding.ticker ?? ""
+        const candidates = buildTickerCandidateList(rawTicker)
+
+        return {
+          ...holding,
+          rowNumber: index + 1,
+          rawTicker: candidates.original ?? rawTicker,
+          ticker: candidates.primary ?? holding.ticker ?? rawTicker.toUpperCase(),
+          candidates: candidates.candidates,
+          identifiers: {},
         }
-      } catch (err) {
-        setParsedData(null)
-        setError(err instanceof Error ? err.message : "Failed to parse file")
-        setParseResult({ errors: [err instanceof Error ? err.message : "Failed to parse file"], warnings: [] })
-      } finally {
-        setIsLoading(false)
-      }
-    } else if (parsedData && !mappings.ticker) {
-      setParsedData(null)
-      setParseResult(null)
-    }
-  }, [mappings, fileContent, isCSV, identifierColumns])
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0]
-    if (selectedFile) {
-      setFile(selectedFile)
-      setError(null)
-      setParsedData(null)
-      setShowPreview(false)
-      setHeaders([])
-      setMappings({
-        ticker: "",
-        weight: "",
-        shares: "",
-        purchasePrice: "",
       })
-      setIdentifierColumns({})
-      setFileContent("")
-      setIsCSV(false)
-      setParseResult(null)
-      setShowAdvancedMapping(false)
-    }
-  }
+    },
+    [],
+  )
 
-  const handleLoadHeaders = async () => {
-    if (!file) return
-
-    setIsLoading(true)
-    setError(null)
+  const resetFlow = useCallback(() => {
+    setFile(null)
+    setFileName("")
+    setFileSize(0)
+    setFileContent("")
+    setHeaders([])
+    setMappings({
+      ticker: "",
+      weight: "",
+      shares: "",
+      purchasePrice: "",
+    })
+    setParseResult(null)
+    setParsedData([])
+    setErrorMessage(null)
+    setIsCSV(false)
+    setMappingOpen(false)
     setResolutionSummary(null)
+    setCreatedPortfolio(null)
+    setDetectedDelimiter(null)
+    setEncoding(null)
+    setUploadTime(null)
+    updateStep("upload")
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+  }, [updateStep])
+
+  const updateMapping = useCallback((field: keyof ColumnMappings, value: string) => {
+    setMappings((previous) => ({
+      ...previous,
+      [field]: value,
+    }))
+    updateStep("validate")
+  }, [updateStep])
+
+  const handleOptionalChange = useCallback(
+    (field: keyof ColumnMappings, value: string) => {
+      updateMapping(field, value === "none" ? "" : value)
+    },
+    [updateMapping],
+  )
+
+  const mappingStatus = useMemo(
+    () => [
+      { field: "ticker", label: "Ticker", required: true, mapped: Boolean(mappings.ticker) },
+      { field: "weight", label: "Weight (%)", required: false, mapped: Boolean(mappings.weight) },
+      { field: "shares", label: "Shares", required: false, mapped: Boolean(mappings.shares) },
+      { field: "purchasePrice", label: "Purchase price", required: false, mapped: Boolean(mappings.purchasePrice) },
+    ],
+    [mappings],
+  )
+
+  const isMappingSatisfied = mappingStatus.filter((item) => item.required).every((item) => item.mapped)
+
+  const parseCSVIfPossible = useCallback(() => {
+    if (!isCSV || !fileContent) return
+    if (!mappings.ticker) {
+      setParseResult(null)
+      setParsedData([])
+      updateStep("validate")
+      return
+    }
+
+    setIsBusy(true)
+    setErrorMessage(null)
 
     try {
-      const content = await file.text()
-      setFileContent(content)
+      const result = parseCSVContent(fileContent, mappings)
+      setDetectedDelimiter(result.detectedDelimiter ?? null)
+      setEncoding(result.encoding ?? null)
 
-      if (file.name.endsWith(".csv") || file.type === "text/csv") {
-        const lines = content.trim().split(/\r?\n/)
-        if (lines.length < 1) {
-          throw new Error("Empty file.")
-        }
-        
-        // Detect delimiter
-        const delimiter = content.includes('\t') ? '\t' : 
-                         content.includes(';') ? ';' : 
-                         content.includes('|') ? '|' : ','
-        
-        const rawHeaders = lines[0].split(delimiter).map((h) => h.trim().replace(/['"]/g, ''))
-        setHeaders(rawHeaders)
-        setIsCSV(true)
-
-        // Auto-map headers using Bloomberg field mappings
-        const autoMappings = autoMapHeaders(rawHeaders)
-        
-        // Fallback to basic mappings if auto-mapping fails
-        const lowerHeaders = rawHeaders.map((h) => h.toLowerCase())
-        let ticker = autoMappings.ticker || ""
-        let weight = autoMappings.weight || ""
-        let purchasePrice = autoMappings.purchasePrice || ""
-        let shares = autoMappings.shares || ""
-
-        // Enhanced auto-detection
-        if (!ticker) {
-          const tickerIdx = lowerHeaders.findIndex(
-            (h) => h.includes("ticker") || h.includes("symbol") || h.includes("stock")
-          )
-          if (tickerIdx !== -1) ticker = rawHeaders[tickerIdx]
-        }
-
-        if (!weight) {
-          const weightIdx = lowerHeaders.findIndex(
-            (h) => h.includes("weight") || h.includes("allocation") || h.includes("percent") || h.includes("percentage")
-          )
-          if (weightIdx !== -1) weight = rawHeaders[weightIdx]
-        }
-
-        if (!shares) {
-          const sharesIdx = lowerHeaders.findIndex(
-            (h) => h.includes("shares") || h.includes("quantity") || h.includes("units") || h.includes("amount") || h.includes("position")
-          )
-          if (sharesIdx !== -1) shares = rawHeaders[sharesIdx]
-        }
-
-        if (!purchasePrice) {
-          const priceIdx = lowerHeaders.findIndex(
-            (h) => h.includes("price") || h.includes("cost") || h.includes("purchase") || h.includes("share price")
-          )
-          if (priceIdx !== -1) purchasePrice = rawHeaders[priceIdx]
-        }
-
-        // Fallback to positions if not set
-        if (!ticker && rawHeaders.length >= 1) ticker = rawHeaders[0]
-        if (!weight && rawHeaders.length >= 2) weight = rawHeaders[1]
-        if (!purchasePrice && rawHeaders.length >= 3) purchasePrice = rawHeaders[2]
-        if (!shares && rawHeaders.length >= 4) shares = rawHeaders[3]
-
-        setMappings({
-          ticker,
-          weight,
-          shares,
-          purchasePrice,
-          ...autoMappings
+      if (result.holdings.length === 0) {
+        setParsedData([])
+        setParseResult({
+          errors: result.errors.length ? result.errors : ["No valid holdings found in the file."],
+          warnings: result.warnings,
         })
-
-        setShowPreview(true)
-      } else if (file.name.endsWith(".txt") || file.type === "text/plain") {
-        // Simple text parsing - assume each line is ticker percentage share_price shares
-        const lines = content.trim().split("\n")
-        const parsed = lines
-          .map((line) => {
-            const parts = line.trim().split(/[,\s]+/)
-            const rawTicker = parts[0]?.trim() ?? ""
-            if (!rawTicker) return null
-            const tickerCandidates = buildTickerCandidateList(rawTicker)
-            const holding: ParsedHolding = {
-              rowNumber: index + 1,
-              rawTicker,
-              ticker: tickerCandidates.primary ?? rawTicker.toUpperCase(),
-              candidates: tickerCandidates.candidates,
-              identifiers: {},
-            }
-            if (parts[1]) {
-              const weight = Number.parseFloat(parts[1].replace("%", ""))
-              if (!Number.isNaN(weight)) {
-                holding.weight = weight > 1 ? weight / 100 : weight
-              }
-            }
-            if (parts[2]) {
-              const price = Number.parseFloat(parts[2].replace("$", ""))
-              if (!Number.isNaN(price)) {
-                holding.purchasePrice = price
-              }
-            }
-            if (parts[3]) {
-              const shares = Number.parseFloat(parts[3])
-              if (!Number.isNaN(shares)) {
-                holding.shares = shares
-              }
-            }
-            return holding
-          })
-          .filter((h): h is ParsedHolding => Boolean(h))
-        if (parsed.length === 0) {
-          throw new Error("No valid holdings found in the file.")
-        }
-        setParsedData(parsed)
-        setShowPreview(true)
-        setIsCSV(false)
-        setIdentifierColumns({})
-      } else {
-        throw new Error("Unsupported file type. Please upload CSV or TXT files.")
+        updateStep("validate")
+        return
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to process file")
+
+      const enriched = enrichHoldings(result.holdings)
+      setParsedData(enriched)
+
+      const validation = validateHoldings(enriched)
+      const combinedErrors = [...result.errors, ...validation.errors]
+      const combinedWarnings = [...result.warnings, ...validation.warnings]
+
+      setParseResult({
+        errors: combinedErrors,
+        warnings: combinedWarnings,
+      })
+
+      updateStep("review")
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to parse CSV file.")
+      updateStep("validate")
     } finally {
-      setIsLoading(false)
+      setIsBusy(false)
     }
-  }
+  }, [enrichHoldings, fileContent, isCSV, mappings, updateStep])
 
-  const handleSubmit = async () => {
-    if (!parsedData || !portfolioName.trim()) return
+  useEffect(() => {
+    parseCSVIfPossible()
+  }, [parseCSVIfPossible])
 
-    setIsLoading(true)
-    setError(null)
+  const processTextFile = useCallback((content: string) => {
+    const lines = content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+
+    if (lines.length === 0) {
+      setErrorMessage("File appears to be empty.")
+      setParseResult(null)
+      setParsedData([])
+      updateStep("upload")
+      return
+    }
+
+    const holdings: UploadHolding[] = []
+    const warnings: string[] = []
+
+    lines.forEach((line, index) => {
+      const parts = line.split(/[,\s]+/).map((part) => part.trim())
+      const rawTicker = parts[0]
+      if (!rawTicker) {
+        warnings.push(`Row ${index + 1}: Missing ticker value.`)
+        return
+      }
+
+      const candidates = buildTickerCandidateList(rawTicker)
+      const holding: UploadHolding = {
+        ticker: candidates.primary ?? rawTicker.toUpperCase(),
+        rawTicker,
+        candidates: candidates.candidates,
+        identifiers: {},
+        rowNumber: index + 1,
+      }
+
+      if (parts[1]) {
+        const parsedWeight = Number.parseFloat(parts[1].replace("%", ""))
+        if (!Number.isNaN(parsedWeight)) {
+          holding.weight = parsedWeight > 1 ? parsedWeight / 100 : parsedWeight
+        }
+      }
+
+      if (parts[2]) {
+        const parsedPrice = Number.parseFloat(parts[2].replace(/[$,]/g, ""))
+        if (!Number.isNaN(parsedPrice)) {
+          holding.purchasePrice = parsedPrice
+        }
+      }
+
+      if (parts[3]) {
+        const parsedShares = Number.parseFloat(parts[3].replace(/[$,]/g, ""))
+        if (!Number.isNaN(parsedShares)) {
+          holding.shares = parsedShares
+        }
+      }
+
+      holdings.push(holding)
+    })
+
+    if (!holdings.length) {
+      setErrorMessage("No valid holdings were detected in the file.")
+      setParseResult({ errors: ["No valid rows detected."], warnings })
+      setParsedData([])
+      updateStep("upload")
+      return
+    }
+
+    const validation = validateHoldings(holdings)
+    setParsedData(holdings)
+    setParseResult({
+      errors: validation.errors,
+      warnings: [...warnings, ...validation.warnings],
+    })
+    updateStep("review")
+  }, [updateStep])
+
+  const initializeUpload = useCallback(
+    async (selectedFile: File) => {
+      if (!selectedFile) return
+
+      if (selectedFile.size > MAX_FILE_SIZE) {
+        setErrorMessage("File is too large. Maximum supported size is 10 MB.")
+        return
+      }
+
+      const extension = selectedFile.name.split(".").pop()?.toLowerCase()
+      const isCsvFile = extension === "csv" || selectedFile.type === "text/csv"
+      const isTextFile = extension === "txt" || selectedFile.type === "text/plain"
+
+      if (!isCsvFile && !isTextFile) {
+        setErrorMessage("Unsupported file type. Please upload a .csv file.")
+        return
+      }
+
+      setFile(selectedFile)
+      setFileName(selectedFile.name)
+      setFileSize(selectedFile.size)
+      setUploadTime(new Date())
+      setErrorMessage(null)
+      setParseResult(null)
+      setParsedData([])
+      setResolutionSummary(null)
+      setCreatedPortfolio(null)
+      setDetectedDelimiter(null)
+      setEncoding(null)
+      updateStep("validate")
+
+      try {
+        const content = await selectedFile.text()
+
+        if (isCsvFile) {
+          setIsCSV(true)
+          setFileContent(content)
+
+          const delimiter = detectDelimiter(content)
+          const rawHeaders = content
+            .split(/\r?\n/)[0]
+            ?.split(delimiter)
+            ?.map((header) => header.trim().replace(/['"]/g, "")) ?? []
+
+          const initialMappings = buildInitialColumnMappings(rawHeaders)
+          setHeaders(rawHeaders)
+          setMappings(initialMappings)
+          setMappingOpen(!initialMappings.ticker)
+        } else {
+          setIsCSV(false)
+          setHeaders([])
+          setFileContent("")
+          processTextFile(content)
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "Failed to read file.")
+        updateStep("upload")
+      }
+    },
+    [processTextFile, updateStep],
+  )
+
+  const handleDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      event.stopPropagation()
+      setIsDragOver(false)
+
+      const droppedFile = event.dataTransfer.files?.[0]
+      if (droppedFile) {
+        initializeUpload(droppedFile)
+      }
+    },
+    [initializeUpload],
+  )
+
+  const handleFileInput = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const selectedFile = event.target.files?.[0]
+      if (selectedFile) {
+        initializeUpload(selectedFile)
+        event.target.value = ""
+      }
+    },
+    [initializeUpload],
+  )
+
+  const totalHoldings = parsedData.length
+  const errorCount = parseResult?.errors.length ?? 0
+  const warningCount = parseResult?.warnings.length ?? 0
+
+  const canImport =
+    totalHoldings > 0 &&
+    errorCount === 0 &&
+    portfolioName.trim().length > 0 &&
+    !isImporting
+
+  const handleDownloadIssues = useCallback(() => {
+    downloadIssueReport(parseResult?.errors ?? [], parseResult?.warnings ?? [])
+  }, [parseResult])
+
+  const handleViewPortfolio = useCallback(() => {
+    if (createdPortfolio) {
+      router.push(`/dashboard/portfolio/${createdPortfolio.id}`)
+    }
+  }, [createdPortfolio, router])
+
+  const handleSubmit = useCallback(async () => {
+    if (!canImport) {
+      if (!portfolioName.trim()) {
+        setErrorMessage("Please give your portfolio a name before importing.")
+        return
+      }
+      if (!parsedData.length) {
+        setErrorMessage("Upload and validate a CSV before importing.")
+        return
+      }
+      if (errorCount > 0) {
+        setErrorMessage("Resolve the blocking errors before importing.")
+        return
+      }
+    }
+
+    setIsImporting(true)
+    updateStep("import")
+    setErrorMessage(null)
     setResolutionSummary(null)
 
     try {
       const {
         data: { user },
       } = await supabase.auth.getUser()
-      if (!user) throw new Error("Not authenticated")
+
+      if (!user) {
+        throw new Error("You need to be signed in to import a portfolio.")
+      }
 
       const resolverResponse = await fetch("/api/tickers/resolve", {
         method: "POST",
@@ -265,7 +930,7 @@ export function PortfolioUploadForm() {
         body: JSON.stringify({
           holdings: parsedData.map((holding) => ({
             rowNumber: holding.rowNumber,
-            rawTicker: holding.rawTicker,
+            rawTicker: holding.rawTicker ?? holding.ticker,
             ticker: holding.ticker,
             candidates: holding.candidates,
             identifiers: holding.identifiers,
@@ -273,82 +938,78 @@ export function PortfolioUploadForm() {
         }),
       })
 
-      const resolverPayload = await resolverResponse
-        .json()
-        .catch(() => ({ error: "Failed to resolve tickers" }))
+      const resolverPayload = (await resolverResponse.json().catch(() => ({
+        error: "Failed to resolve tickers",
+      }))) as TickerResolutionResponse & { error?: string }
 
-      if (!resolverResponse.ok || (resolverPayload as any)?.error) {
-        const message =
-          typeof (resolverPayload as any)?.error === "string"
-            ? (resolverPayload as any).error
-            : "Failed to resolve tickers"
-        throw new Error(message)
+      if (!resolverResponse.ok || resolverPayload?.error) {
+        throw new Error(
+          resolverPayload?.error ?? "Ticker resolution service returned an unexpected response.",
+        )
       }
 
-      const resolution = resolverPayload as TickerResolutionResponse
-      const resolvedRecords = Array.isArray(resolution.resolved) ? resolution.resolved : []
-      const unresolvedRecords = Array.isArray(resolution.unresolved) ? resolution.unresolved : []
+      const resolvedRecords = Array.isArray(resolverPayload.resolved) ? resolverPayload.resolved : []
+      const unresolvedRecords = Array.isArray(resolverPayload.unresolved) ? resolverPayload.unresolved : []
 
       const resolutionByRow = new Map<number, TickerResolutionRecord>()
       resolvedRecords.forEach((record) => {
         resolutionByRow.set(record.rowNumber, record)
       })
 
-      const normalizedHoldings = parsedData.map((holding) => {
-        const resolved = resolutionByRow.get(holding.rowNumber)
-        if (!resolved) {
-          return { ...holding, resolution: undefined }
-        }
-
-        return {
-          ...holding,
-          ticker: resolved.resolvedTicker,
-          resolution: {
-            resolvedTicker: resolved.resolvedTicker,
-            source: resolved.source,
-            confidence: resolved.confidence,
-            usedIdentifier: resolved.usedIdentifier,
-            note: resolved.note,
-          },
-        }
-      })
-
-      setParsedData(normalizedHoldings)
+      setParsedData((previous) =>
+        previous.map((holding) => {
+          const resolution = resolutionByRow.get(holding.rowNumber)
+          if (!resolution) return holding
+          return {
+            ...holding,
+            ticker: resolution.resolvedTicker,
+            resolution: {
+              resolvedTicker: resolution.resolvedTicker,
+              source: resolution.source,
+              confidence: resolution.confidence,
+              usedIdentifier: resolution.usedIdentifier,
+              note: resolution.note,
+            },
+          }
+        }),
+      )
 
       if (unresolvedRecords.length > 0) {
         const unresolvedSummary = unresolvedRecords
           .map((record) => record.rawTicker || `row ${record.rowNumber}`)
           .join(", ")
-        setError(
-          `Unable to resolve ticker(s): ${unresolvedSummary}. Adjust the column mapping or update your file and try again.`,
+        setErrorMessage(
+          `We couldn’t resolve the ticker(s): ${unresolvedSummary}. Adjust the mapping or CSV and try again.`,
         )
-        setIsLoading(false)
+        updateStep("review")
+        setIsImporting(false)
         return
       }
 
       const sourceLabels: Record<string, string> = {
         provided: "exact match",
         candidate: "cleaned value",
-        isin: "via ISIN",
-        search: "via search",
+        isin: "ISIN lookup",
+        search: "symbol search",
       }
 
-      const sourceCounts = resolvedRecords.reduce<Record<string, number>>((acc, record) => {
-        const key = record.source || "candidate"
-        acc[key] = (acc[key] || 0) + 1
-        return acc
-      }, {})
+      if (resolvedRecords.length) {
+        const sourceCounts = resolvedRecords.reduce<Record<string, number>>((acc, record) => {
+          const key = record.source || "candidate"
+          acc[key] = (acc[key] || 0) + 1
+          return acc
+        }, {})
 
-      const summaryParts = Object.entries(sourceCounts).map(([source, count]) => {
-        const label = sourceLabels[source] || source
-        return `${count} ${label}`
-      })
+        const parts = Object.entries(sourceCounts).map(([source, count]) => {
+          const readable = sourceLabels[source] ?? source
+          return `${count} via ${readable}`
+        })
 
-      if (summaryParts.length) {
-        setResolutionSummary(`Resolved ${resolvedRecords.length} tickers (${summaryParts.join(", ")}).`)
+        if (parts.length) {
+          setResolutionSummary(`Resolved ${resolvedRecords.length} tickers (${parts.join(", ")}).`)
+        }
       }
 
-      // Create portfolio
       const { data: portfolio, error: portfolioError } = await supabase
         .from("portfolios")
         .insert({
@@ -360,380 +1021,366 @@ export function PortfolioUploadForm() {
         .single()
 
       if (portfolioError) throw portfolioError
+      if (!portfolio) throw new Error("Portfolio creation returned no data.")
 
-      // Insert holdings with enhanced Bloomberg fields
-      const holdings = parsedData.map((holding) => ({
+      const holdingsToInsert = parsedData.map((holding) => ({
         portfolio_id: portfolio.id,
         ticker: holding.ticker,
-        weight: holding.weight || 0,
-        shares: holding.shares || null,
-        purchase_price: holding.purchasePrice || null,
-        // Bloomberg-specific fields
-        security_name: holding.securityName || null,
-        isin: holding.isin || null,
-        cusip: holding.cusip || null,
-        sedol: holding.sedol || null,
-        market_value: holding.marketValue || null,
-        cost_value: holding.costValue || null,
-        unrealized_pl: holding.unrealizedPl || null,
-        realized_pl: holding.realizedPl || null,
-        total_pl: holding.totalPl || null,
-        sector: holding.sector || null,
-        country: holding.country || null,
-        asset_type: holding.assetType || null,
-        coupon: holding.coupon || null,
-        maturity_date: holding.maturityDate || null,
-        yield_to_maturity: holding.yieldToMaturity || null,
-        trade_date: holding.tradeDate || null,
-        settlement_date: holding.settlementDate || null,
-        market_price: holding.marketPrice || null,
-        account_id: holding.accountId || null,
-        portfolio_name: holding.portfolioName || null,
+        weight: holding.weight ?? 0,
+        shares: holding.shares ?? null,
+        purchase_price: holding.purchasePrice ?? null,
+        security_name: holding.securityName ?? null,
+        isin: holding.isin ?? null,
+        cusip: holding.cusip ?? null,
+        sedol: holding.sedol ?? null,
+        market_value: holding.marketValue ?? null,
+        cost_value: holding.costValue ?? null,
+        unrealized_pl: holding.unrealizedPl ?? null,
+        realized_pl: holding.realizedPl ?? null,
+        total_pl: holding.totalPl ?? null,
+        sector: holding.sector ?? null,
+        country: holding.country ?? null,
+        asset_type: holding.assetType ?? null,
+        coupon: holding.coupon ?? null,
+        maturity_date: holding.maturityDate ?? null,
+        yield_to_maturity: holding.yieldToMaturity ?? null,
+        trade_date: holding.tradeDate ?? null,
+        settlement_date: holding.settlementDate ?? null,
+        market_price: holding.marketPrice ?? null,
+        account_id: holding.accountId ?? null,
+        portfolio_name: holding.portfolioName ?? null,
       }))
 
-      const { error: holdingsError } = await supabase.from("portfolio_holdings").insert(holdings)
-
+      const { error: holdingsError } = await supabase.from("portfolio_holdings").insert(holdingsToInsert)
       if (holdingsError) throw holdingsError
 
-      router.push(`/dashboard/portfolio/${portfolio.id}`)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create portfolio")
+      setCreatedPortfolio({ id: portfolio.id, name: portfolio.name ?? portfolioName.trim() })
+      updateStep("complete")
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to import portfolio.")
+      updateStep("review")
     } finally {
-      setIsLoading(false)
+      setIsImporting(false)
     }
-  }
+  }, [
+    canImport,
+    errorCount,
+    parsedData,
+    portfolioDescription,
+    portfolioName,
+    router,
+    supabase,
+    updateStep,
+  ])
 
-  const updateMapping = (field: keyof ColumnMappings, value: string) => {
-    setMappings((prev) => ({ ...prev, [field]: value }))
-  }
-
-  const getOptionalValue = (field: keyof ColumnMappings) => {
-    const value = mappings[field]
-    return value === "" ? "none" : value
-  }
-
-  const handleOptionalChange = (field: keyof ColumnMappings, value: string) => {
-    updateMapping(field, value === "none" ? "" : value)
-  }
-
-  const getFieldMappingByBloombergField = (bloombergField: string) => {
-    return BLOOMBERG_FIELD_MAPPINGS.find(mapping => mapping.bloombergField === bloombergField)
-  }
-
-  const getMappingsByCategory = (category: string) => {
-    if (category === "all") return BLOOMBERG_FIELD_MAPPINGS
-    return BLOOMBERG_FIELD_MAPPINGS.filter(mapping => mapping.category === category)
-  }
-
-  const formatValue = (value: any, type: string): string => {
-    if (value === null || value === undefined) return "-"
-    
-    switch (type) {
-      case 'currency':
-        return `$${Number(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-      case 'percentage':
-        return `${(Number(value) * 100).toFixed(2)}%`
-      case 'number':
-        return Number(value).toLocaleString('en-US')
-      case 'date':
-        return value
-      default:
-        return String(value)
+  const reviewCardData = useMemo<ReviewCardProps | null>(() => {
+    if (currentStep === "upload" || parsedData.length === 0) return null
+    return {
+      parsedData,
+      parseResult,
+      errorCount,
+      warningCount,
+      errorMessage,
+      canImport,
+      isImporting,
+      onReset: resetFlow,
+      onDownloadIssues: handleDownloadIssues,
+      onImport: handleSubmit,
+      currentStep,
+      columns: editableColumns,
+      onChangeHolding: handleHoldingFieldChange,
     }
-  }
+  }, [
+    currentStep,
+    parsedData,
+    parseResult,
+    errorCount,
+    warningCount,
+    errorMessage,
+    canImport,
+    isImporting,
+    resetFlow,
+    handleDownloadIssues,
+    handleSubmit,
+    editableColumns,
+    handleHoldingFieldChange,
+  ])
+
+  useEffect(() => {
+    if (onReviewContentChange) {
+      onReviewContentChange(reviewCardData)
+    }
+  }, [onReviewContentChange, reviewCardData])
+
+  const currentStepIndex = useMemo(() => {
+    if (currentStep === "complete") return STEP_SEQUENCE.length - 1
+    const index = STEP_SEQUENCE.findIndex((step) => step.id === currentStep)
+    return index === -1 ? 0 : index
+  }, [currentStep])
 
   return (
     <div className="space-y-6">
-      {/* Help Section */}
-      <Card className="border-blue-200 bg-blue-50/50 dark:border-blue-800 dark:bg-blue-950/20">
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2 text-blue-900 dark:text-blue-100">
-            <HelpCircle className="w-5 h-5" />
-            <span>Bloomberg CSV Import Guide</span>
-          </CardTitle>
-          <CardDescription className="text-blue-700 dark:text-blue-300">
-            Import your portfolio data from Bloomberg Terminal exports or other CSV files with flexible column mapping.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid md:grid-cols-2 gap-4 text-sm">
-            <div>
-              <h4 className="font-semibold mb-2">Supported Bloomberg Fields:</h4>
-              <ul className="space-y-1 text-blue-600 dark:text-blue-400">
-                <li>• Ticker symbols (TICKER)</li>
-                <li>• Security names (SECURITY_NAME)</li>
-                <li>• Portfolio weights (WEIGHT_PCT)</li>
-                <li>• Market values (MKT_VAL)</li>
-                <li>• Cost basis (COST_VALUE)</li>
-                <li>• P&L data (UNREALIZED_PL, REALIZED_PL)</li>
-                <li>• Sector classifications (INDUSTRY_SECTOR)</li>
-                <li>• And many more...</li>
-              </ul>
-            </div>
-            <div>
-              <h4 className="font-semibold mb-2">File Requirements:</h4>
-              <ul className="space-y-1 text-blue-600 dark:text-blue-400">
-                <li>• CSV format (.csv files)</li>
-                <li>• First row must contain headers</li>
-                <li>• Ticker column is required</li>
-                <li>• Other columns are optional</li>
-                <li>• Supports various delimiters (comma, semicolon, tab)</li>
-              </ul>
-            </div>
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-wrap items-center gap-4">
+          {STEP_SEQUENCE.map((step, index) => {
+            const isCompleted = currentStepIndex > index
+            const isCurrent = currentStepIndex === index
+
+            return (
+              <div key={step.id} className="flex items-center gap-2">
+                <div
+                  className={cn(
+                    "flex h-8 w-8 items-center justify-center rounded-full border text-sm font-medium transition-colors",
+                    isCompleted
+                      ? "border-blue-500 bg-blue-500 text-white"
+                      : isCurrent
+                      ? "border-blue-500 text-blue-600 dark:text-blue-300"
+                      : "border-slate-300 text-slate-400 dark:border-slate-700 dark:text-slate-500",
+                  )}
+                  aria-label={step.label}
+                >
+                  {isCompleted ? <CheckCircle2 className="h-5 w-5" /> : index + 1}
+                </div>
+                <div className="text-xs">
+                  <div
+                    className={cn(
+                      "font-semibold",
+                      isCurrent
+                        ? "text-slate-900 dark:text-slate-100"
+                        : "text-slate-500 dark:text-slate-400",
+                    )}
+                  >
+                    {step.label}
+                  </div>
+                  <div className="text-slate-500 dark:text-slate-400">{step.description}</div>
+                </div>
+                {index < STEP_SEQUENCE.length - 1 && (
+                  <div className="hidden sm:block h-px w-10 bg-slate-200 dark:bg-slate-700" aria-hidden="true" />
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      <div
+        onDragOver={(event) => {
+          event.preventDefault()
+          setIsDragOver(true)
+        }}
+        onDragLeave={() => setIsDragOver(false)}
+        onDrop={handleDrop}
+        className={cn(
+          "rounded-xl border-2 border-dashed p-6 transition-colors",
+          isDragOver
+            ? "border-blue-500 bg-blue-50/50 dark:border-blue-500/70 dark:bg-blue-500/10"
+            : "border-slate-300 dark:border-slate-700",
+        )}
+      >
+        <div className="flex flex-col items-center justify-center gap-3 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/30">
+            <Upload className="h-6 w-6 text-blue-600 dark:text-blue-400" />
           </div>
-        </CardContent>
-      </Card>
-
-      {/* Upload Form */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <Upload className="w-5 h-5" />
-            <span>Upload Portfolio File</span>
-          </CardTitle>
-          <CardDescription>
-            Upload your portfolio data from Bloomberg Terminal exports, Excel exports, or other CSV files.
-            Our system will automatically detect and map common Bloomberg field names.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="portfolioName">Portfolio Name *</Label>
-            <Input
-              id="portfolioName"
-              placeholder="My Investment Portfolio"
-              value={portfolioName}
-              onChange={(e) => setPortfolioName(e.target.value)}
-              required
-            />
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+              Drag & drop your CSV here, or
+              <Button
+                type="button"
+                variant="link"
+                className="px-1 text-blue-600 hover:text-blue-500 dark:text-blue-400"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                browse to upload
+              </Button>
+            </p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Supports .csv or .txt files · Max size {formatFileSize(MAX_FILE_SIZE)} · We’ll validate structure
+              instantly.
+            </p>
           </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="portfolioDescription">Description (Optional)</Label>
-            <Textarea
-              id="portfolioDescription"
-              placeholder="Describe your portfolio strategy or goals..."
-              value={portfolioDescription}
-              onChange={(e) => setPortfolioDescription(e.target.value)}
-              rows={3}
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="file">Portfolio File *</Label>
-            <Input id="file" type="file" accept=".csv,.txt" onChange={handleFileChange} className="cursor-pointer" />
-            <div className="text-xs text-slate-500 dark:text-slate-400 space-y-1">
-              <p><strong>CSV format:</strong> Recommended for Bloomberg exports. Include headers in the first row.</p>
-              <p><strong>TXT format:</strong> Simple format: ticker percentage share_price shares (space or comma separated)</p>
-              <p><strong>Auto-detection:</strong> We'll automatically detect Bloomberg field names and map them appropriately.</p>
-            </div>
-          </div>
-
-          {file && !showPreview && (
-            <Button onClick={handleLoadHeaders} disabled={isLoading} className="w-full">
-              {isLoading ? "Analyzing File..." : "Load and Analyze File"}
-            </Button>
-          )}
-
-          {error && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Field Mapping Interface */}
-      {showPreview && isCSV && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <Settings className="w-5 h-5" />
-                <span>Field Mapping</span>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,.txt,text/csv,text/plain"
+            className="hidden"
+            onChange={handleFileInput}
+          />
+        </div>
+        {file && (
+          <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-800 dark:bg-slate-900/60">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-slate-600 dark:text-slate-300">
+              <div className="space-y-1">
+                <p className="font-medium text-slate-900 dark:text-slate-100">{fileName}</p>
+                <div className="flex flex-wrap items-center gap-3">
+                  <span>{formatFileSize(fileSize)}</span>
+                  {uploadTime && <span>Uploaded {uploadTime.toLocaleString()}</span>}
+                  {detectedDelimiter && <span>Delimiter: {detectedDelimiter}</span>}
+                  {encoding && <span>Encoding: {encoding}</span>}
+                </div>
               </div>
               <Button
+                type="button"
                 variant="outline"
                 size="sm"
-                onClick={() => setShowAdvancedMapping(!showAdvancedMapping)}
+                onClick={() => {
+                  resetFlow()
+                }}
               >
-                {showAdvancedMapping ? "Hide Advanced" : "Show Advanced"}
+                <RefreshCcw className="mr-2 h-4 w-4" />
+                Choose different file
               </Button>
-            </CardTitle>
-            <CardDescription>
-              Map your CSV columns to portfolio fields. Required fields are marked with *.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {headers.length > 0 && (
+        <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Column mapping</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                We detected the following fields. Adjust if your headers differ or use the manual mapper.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="flex items-center gap-1 text-xs"
+              onClick={() => setMappingOpen((value) => !value)}
+            >
+              <ChevronDown
+                className={cn("h-4 w-4 transition-transform", mappingOpen ? "rotate-180" : "rotate-0")}
+              />
+              {mappingOpen ? "Hide mapping" : "Adjust mapping"}
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap gap-3">
+            {mappingStatus.map((status) => (
+              <div
+                key={status.field}
+                className={cn(
+                  "flex items-center gap-2 rounded-full border px-3 py-1 text-xs",
+                  status.mapped
+                    ? "border-green-200 bg-green-50 text-green-700 dark:border-green-900/40 dark:bg-green-900/20 dark:text-green-300"
+                    : status.required
+                    ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-300"
+                    : "border-slate-200 bg-white text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300",
+                )}
+              >
+                {status.mapped ? <CheckCircle2 className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
+                {status.label}
+                {!status.mapped && status.required && <span className="rounded bg-red-100 px-1 text-[10px] text-red-600">required</span>}
+              </div>
+            ))}
+          </div>
+
+          {(mappingOpen || !isMappingSatisfied) && (
+            <div className="space-y-4 rounded-lg bg-white p-4 shadow-sm dark:bg-slate-950/40">
+              <div className="grid gap-4 md:grid-cols-2">
+                {mappingStatus.map((mapping) => (
+                  <div key={mapping.field} className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-200">
+                      {mapping.label} {mapping.required && <span className="text-red-500">*</span>}
+                    </label>
+                    <Select
+                      value={mappings[mapping.field as keyof ColumnMappings] || "none"}
+                      onValueChange={(value) => {
+                        if (mapping.required) {
+                          updateMapping(mapping.field as keyof ColumnMappings, value === "none" ? "" : value)
+                        } else {
+                          handleOptionalChange(mapping.field as keyof ColumnMappings, value)
+                        }
+                      }}
+                    >
+                      <SelectTrigger className="text-sm">
+                        <SelectValue placeholder={`Select ${mapping.label}`} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None</SelectItem>
+                        {headers.map((header) => (
+                          <SelectItem key={header} value={header}>
+                            {header}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+
+            </div>
+          )}
+        </div>
+      )}
+
+      {currentStep === "validate" && isBusy && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+          Validating headers and sample rows… hang tight.
+        </div>
+      )}
+
+      {reviewCardData && !onReviewContentChange && (
+        <Card className="border-slate-200 dark:border-slate-800/70">
+          <CardHeader>
+            <CardTitle className="text-slate-900 dark:text-slate-100">Review results</CardTitle>
+            <CardDescription className="text-sm text-slate-600 dark:text-slate-400">
+              Inspect the parsed holdings, warnings, and any issues before importing your portfolio.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Tabs value={selectedCategory} onValueChange={setSelectedCategory}>
-              <TabsList className="grid w-full grid-cols-6">
-                <TabsTrigger value="all">All</TabsTrigger>
-                <TabsTrigger value="security">Security</TabsTrigger>
-                <TabsTrigger value="holdings">Holdings</TabsTrigger>
-                <TabsTrigger value="analytics">Analytics</TabsTrigger>
-                <TabsTrigger value="type">Type</TabsTrigger>
-                <TabsTrigger value="trade">Trade</TabsTrigger>
-              </TabsList>
-              
-              <TabsContent value={selectedCategory} className="mt-4">
-                <div className="grid gap-4">
-                  {getMappingsByCategory(selectedCategory).map((mapping) => {
-                    const fieldName = mapping.bloombergField.toLowerCase().replace(/_/g, '') as keyof ColumnMappings;
-                    const currentValue = mappings[fieldName] || "";
-                    
-                    return (
-                      <div key={mapping.bloombergField} className="flex items-center space-x-4 p-3 border rounded-lg">
-                        <div className="flex-1">
-                          <div className="flex items-center space-x-2">
-                            <Label className="font-medium">
-                              {mapping.displayName}
-                              {mapping.required && <span className="text-red-500 ml-1">*</span>}
-                            </Label>
-                            <Badge variant="secondary" className="text-xs">
-                              {mapping.dataType}
-                            </Badge>
-                          </div>
-                          <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-                            {mapping.description}
-                          </p>
-                          <div className="text-xs text-slate-500 mt-1">
-                            <strong>Examples:</strong> {mapping.examples.join(", ")}
-                          </div>
-                        </div>
-                        <div className="w-64">
-                          <Select
-                            value={currentValue || "none"}
-                            onValueChange={(value) => {
-                              if (mapping.required) {
-                                updateMapping(fieldName, value === "none" ? "" : value);
-                              } else {
-                                handleOptionalChange(fieldName, value);
-                              }
-                            }}
-                          >
-                            <SelectTrigger>
-                              <SelectValue placeholder={`Select ${mapping.displayName}`} />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="none">None</SelectItem>
-                              {headers.map((header) => (
-                                <SelectItem key={header} value={header}>
-                                  {header}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </TabsContent>
-            </Tabs>
+            <DefaultReviewCardContent {...reviewCardData} />
           </CardContent>
         </Card>
       )}
-
-      {/* Data Preview */}
-      {showPreview && (
+      {currentStep === "import" && isImporting && (
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center space-x-2">
-              <CheckCircle2 className="w-5 h-5 text-green-600" />
-              <span>Data Preview {parsedData ? `(${parsedData.length} holdings)` : ""}</span>
+            <CardTitle className="flex items-center gap-2 text-slate-900 dark:text-slate-100">
+              <Sparkles className="h-5 w-5 text-blue-600 dark:text-blue-400" />
+              Importing portfolio…
             </CardTitle>
-            <CardDescription>Review your portfolio data before creating</CardDescription>
+            <CardDescription className="text-slate-600 dark:text-slate-400">
+              We’re creating the portfolio and recording all holdings. This should only take a few seconds.
+            </CardDescription>
           </CardHeader>
-          <CardContent>
-            {/* Validation Messages */}
-            {parseResult && (parseResult.errors.length > 0 || parseResult.warnings.length > 0) && (
-              <div className="space-y-2 mb-4">
-                {parseResult.errors.map((error, index) => (
-                  <Alert key={index} variant="destructive">
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
-                ))}
-                {parseResult.warnings.map((warning, index) => (
-                  <Alert key={index} variant="default">
-                    <AlertCircle className="h-4 w-4" />
-                    <AlertDescription>{warning}</AlertDescription>
-                  </Alert>
-                ))}
-              </div>
+        </Card>
+      )}
+
+      {currentStep === "complete" && createdPortfolio && (
+        <Card className="border-green-200 bg-green-50/50 dark:border-green-900/50 dark:bg-green-950/30">
+          <CardHeader className="space-y-2">
+            <CardTitle className="flex items-center gap-2 text-green-700 dark:text-green-200">
+              <Sparkles className="h-5 w-5" />
+              Portfolio imported successfully
+            </CardTitle>
+            <CardDescription className="text-sm text-green-700/80 dark:text-green-200/80">
+              {createdPortfolio.name} is ready. {parsedData.length} holdings were saved. Our AI engine is already
+              analysing the portfolio for insights—check the Research tab in a moment.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {resolutionSummary && (
+              <Alert className="border-green-300 bg-green-100 text-green-800 dark:border-green-900/40 dark:bg-green-900/20 dark:text-green-200">
+                <CheckCircle2 className="h-4 w-4" />
+                <AlertDescription>{resolutionSummary}</AlertDescription>
+              </Alert>
             )}
-
-            <div className="max-h-96 overflow-y-auto border rounded-lg">
-              <table className="w-full text-sm">
-                <thead className="bg-slate-50 dark:bg-slate-800 sticky top-0">
-                  <tr>
-                    <th className="text-left p-2 border-b">Ticker</th>
-                    <th className="text-left p-2 border-b">Weight</th>
-                    <th className="text-left p-2 border-b">Shares</th>
-                    <th className="text-left p-2 border-b">Price</th>
-                    {showAdvancedMapping && (
-                      <>
-                        <th className="text-left p-2 border-b">Market Value</th>
-                        <th className="text-left p-2 border-b">Sector</th>
-                        <th className="text-left p-2 border-b">Asset Type</th>
-                      </>
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {parsedData && parsedData.length > 0 ? (
-                    parsedData.slice(0, 20).map((holding, index) => (
-                      <tr key={index} className="border-b">
-                        <td className="p-2 font-mono">{holding.ticker}</td>
-                        <td className="p-2">{formatValue(holding.weight, 'percentage')}</td>
-                        <td className="p-2">{formatValue(holding.shares, 'number')}</td>
-                        <td className="p-2">{formatValue(holding.purchasePrice || holding.marketPrice, 'currency')}</td>
-                        {showAdvancedMapping && (
-                          <>
-                            <td className="p-2">{formatValue(holding.marketValue, 'currency')}</td>
-                            <td className="p-2">{holding.sector || "-"}</td>
-                            <td className="p-2">{holding.assetType || "-"}</td>
-                          </>
-                        )}
-                      </tr>
-                    ))
-                  ) : (
-                    <tr>
-                      <td colSpan={showAdvancedMapping ? 7 : 4} className="p-2 text-center text-slate-500">
-                        {isCSV ? "Select columns to preview data" : "No data available"}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-              {parsedData && parsedData.length > 20 && (
-                <div className="p-2 text-center text-sm text-slate-500 bg-slate-50 dark:bg-slate-800">
-                  Showing first 20 of {parsedData.length} holdings
-                </div>
-              )}
-            </div>
-
-            <div className="flex justify-between mt-4">
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setShowPreview(false)
-                  setParsedData(null)
-                  setParseResult(null)
-                }}
-              >
-                Change File
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" onClick={handleViewPortfolio}>
+                View portfolio
               </Button>
-              <LoadingButton
-                onClick={handleSubmit}
-                loading={isLoading}
-                loadingText="Creating portfolio..."
-                spinnerPlacement="start"
-                disabled={!parsedData || !portfolioName.trim() || (parseResult?.errors.length || 0) > 0}
-              >
-                Create Portfolio
-              </LoadingButton>
+              <Button type="button" variant="outline" onClick={resetFlow}>
+                Upload another file
+              </Button>
+              {(warningCount > 0 || errorCount > 0) && (
+                <Button type="button" variant="ghost" className="text-blue-600 dark:text-blue-400" onClick={handleDownloadIssues}>
+                  <DownloadCloud className="mr-2 h-4 w-4" />
+                  Download skipped rows
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>

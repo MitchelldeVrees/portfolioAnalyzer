@@ -1,16 +1,21 @@
+"use strict";
+
 import { Writable } from "stream";
 import { Client as FtpClient } from "basic-ftp";
 import yahooFinance from "yahoo-finance2";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-type ListingSource = "nasdaqlisted" | "otherlisted";
+export type ListingSource = "nasdaqlisted" | "otherlisted";
 
-type RawListing = {
+export type RawListing = {
   symbol: string;
   name: string;
   exchange?: string | null;
+  mic?: string | null;
+  currency?: string | null;
+  lastPrice?: number | null;
   isEtf: boolean;
-  source: ListingSource;
+  source: ListingSource | "euronext-scrape";
   metadata?: Record<string, any>;
 };
 
@@ -36,15 +41,33 @@ export type SyncYahooTickerSummary = {
 
 const NASDAQ_REMOTE_PATH = "SymbolDirectory/nasdaqlisted.txt";
 const OTHER_REMOTE_PATH = "SymbolDirectory/otherlisted.txt";
+const EURONEXT_DOWNLOAD_URL = "https://live.euronext.com/en/pd_es/data/stocks/download?mics=XAMS%2CTNLA";
 
 const DEFAULT_CHUNK_SIZE = 40;
 const DEFAULT_THROTTLE_MS = 250;
+
+const DEFAULT_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) PortifyBot/1.0 Safari/537.36",
+  Accept: "text/csv,application/octet-stream;q=0.9,*/*;q=0.8",
+};
 
 const OTHER_EXCHANGE_MAP: Record<string, string> = {
   A: "NYSE American",
   N: "NYSE",
   P: "NYSE Arca",
   Z: "BATS",
+};
+
+const MIC_TO_YAHOO_SUFFIX: Record<string, string> = {
+  XAMS: ".AS",
+  XPAR: ".PA",
+  XBRU: ".BR",
+  XBRV: ".VX",
+  XLIS: ".LS",
+  XMAD: ".MC",
+  XLON: ".L",
+  XETR: ".DE",
 };
 
 function sleep(ms: number) {
@@ -59,6 +82,71 @@ function sanitizeTicker(ticker: string): string | null {
     return trimmed.replace(/\s+/g, "");
   }
   return trimmed;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function parseCsvRecords(csv: string): string[][] {
+  const rows: string[][] = [];
+  const normalised = csv.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  let currentField = "";
+  let currentRow: string[] = [];
+  let insideQuotes = false;
+
+  for (let i = 0; i < normalised.length; i++) {
+    const char = normalised[i];
+
+    if (char === '"') {
+      if (insideQuotes && normalised[i + 1] === '"') {
+        currentField += '"';
+        i += 1;
+      } else {
+        insideQuotes = !insideQuotes;
+      }
+      continue;
+    }
+
+    if (char === ";" && !insideQuotes) {
+      currentRow.push(currentField.trim());
+      currentField = "";
+      continue;
+    }
+
+    if (char === "\n" && !insideQuotes) {
+      currentRow.push(currentField.trim());
+      currentField = "";
+      if (currentRow.some((cell) => cell.length > 0)) {
+        rows.push(currentRow);
+      }
+      currentRow = [];
+      continue;
+    }
+
+    currentField += char;
+  }
+
+  if (currentField.length || currentRow.length) {
+    currentRow.push(currentField.trim());
+    if (currentRow.some((cell) => cell.length > 0)) {
+      rows.push(currentRow);
+    }
+  }
+
+  return rows;
+}
+
+function renderTableHtml(rows: string[][]): string {
+  const htmlRows = rows
+    .map((cells) => `<tr>${cells.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`)
+    .join("");
+  return `<table><tbody>${htmlRows}</tbody></table>`;
 }
 
 async function downloadFromNasdaq(path: string): Promise<string> {
@@ -122,6 +210,9 @@ function parseNasdaqListings(raw: string): RawListing[] {
       symbol,
       name,
       exchange: "NASDAQ",
+      mic: undefined,
+      currency: "USD",
+      lastPrice: null,
       isEtf,
       source: "nasdaqlisted",
       metadata: {
@@ -170,6 +261,9 @@ function parseOtherListings(raw: string): RawListing[] {
       symbol,
       name,
       exchange,
+      mic: undefined,
+      currency: "USD",
+      lastPrice: null,
       isEtf,
       source: "otherlisted",
       metadata: {
@@ -182,7 +276,7 @@ function parseOtherListings(raw: string): RawListing[] {
   return listings;
 }
 
-async function fetchListings(): Promise<RawListing[]> {
+async function fetchUSListings(): Promise<RawListing[]> {
   const [nasdaqRaw, otherRaw] = await Promise.all([
     downloadFromNasdaq(NASDAQ_REMOTE_PATH),
     downloadFromNasdaq(OTHER_REMOTE_PATH),
@@ -202,6 +296,113 @@ async function fetchListings(): Promise<RawListing[]> {
   }
 
   return Array.from(combined.values());
+}
+
+function isLikelyEtf(name: string): boolean {
+  const upper = name.toUpperCase();
+  return /\b(ETF|UCITS)\b/.test(upper);
+}
+
+function toNumber(value: string | undefined | null): number | null {
+  if (!value) return null;
+  const cleaned = value.replace(/[^\d,.\-]/g, "").replace(",", ".");
+  if (!cleaned) return null;
+  const parsed = Number.parseFloat(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function fetchEuronextAmsterdamListings(): Promise<RawListing[]> {
+  const response = await fetch(EURONEXT_DOWNLOAD_URL, { headers: DEFAULT_HEADERS });
+  if (!response.ok) {
+    throw new Error(`Failed to download Euronext Amsterdam listings (status ${response.status})`);
+  }
+
+  const csvText = await response.text();
+  const records = parseCsvRecords(csvText);
+  if (!records.length) return [];
+
+  const { load } = await import("cheerio");
+  const tableHtml = renderTableHtml(records);
+  const $ = load(tableHtml);
+
+  const headerCells = $("tr")
+    .first()
+    .find("td")
+    .toArray()
+    .map((cell) => $(cell).text().trim());
+
+  if (!headerCells.length) return [];
+
+  const normalisedHeaders = headerCells.map((cell) => cell.toLowerCase());
+  const findIndex = (label: string) => normalisedHeaders.indexOf(label.toLowerCase());
+
+  const nameIdx = findIndex("name");
+  const symbolIdx = findIndex("symbol");
+  const currencyIdx = findIndex("currency");
+  const lastPriceIdx = findIndex("last price");
+  const isinIdx = findIndex("isin");
+  const marketIdx = findIndex("market");
+
+  const listings: RawListing[] = [];
+
+  $("tr")
+    .slice(1)
+    .each((_, element) => {
+      const cells = $(element).find("td");
+      if (cells.length !== headerCells.length) return;
+
+      const rawSymbol = cells.eq(symbolIdx).text().trim();
+      const symbol = sanitizeTicker(rawSymbol);
+      if (!symbol) return;
+
+      const name = cells.eq(nameIdx).text().trim() || symbol;
+      const currency = cells.eq(currencyIdx).text().trim().toUpperCase() || "EUR";
+      const lastPrice = toNumber(cells.eq(lastPriceIdx).text());
+      const isin = cells.eq(isinIdx).text().trim();
+      const market = cells.eq(marketIdx).text().trim();
+
+      listings.push({
+        symbol,
+        name,
+        exchange: "Euronext Amsterdam",
+        mic: "XAMS",
+        currency,
+        lastPrice: lastPrice ?? null,
+        isEtf: isLikelyEtf(name),
+        source: "euronext-scrape",
+        metadata: {
+          isin: isin || null,
+          market: market || null,
+        },
+      });
+    });
+
+  return listings;
+}
+
+function dedupeListings(listings: RawListing[]): RawListing[] {
+  const map = new Map<string, RawListing>();
+  for (const listing of listings) {
+    const keySymbol = sanitizeTicker(listing.symbol) ?? listing.symbol;
+    const keyMic = (listing.mic ?? "").toUpperCase();
+    const key = `${keySymbol}::${keyMic}`;
+    if (!map.has(key)) {
+      map.set(key, listing);
+    }
+  }
+  return Array.from(map.values());
+}
+
+function buildYahooSymbol(listing: RawListing): string {
+  const base = sanitizeTicker(listing.symbol) ?? listing.symbol.trim().toUpperCase();
+  const mic = listing.mic?.toUpperCase();
+  const suffix = mic ? MIC_TO_YAHOO_SUFFIX[mic] ?? "" : "";
+  return sanitizeTicker(`${base}${suffix}`) ?? `${base}${suffix}`;
+}
+
+async function fetchGlobalListings(): Promise<RawListing[]> {
+  const [usListings, amsterdamListings] = await Promise.all([fetchUSListings(), fetchEuronextAmsterdamListings()]);
+  return dedupeListings([...usListings, ...amsterdamListings]);
 }
 
 type QuoteLite = {
@@ -269,11 +470,11 @@ export async function syncYahooTickers(options: SyncOptions = {}): Promise<SyncY
 
   yahooFinance.suppressNotices?.(["yahooSurvey"]);
 
-  const listings = await fetchListings();
+  const listings = await fetchGlobalListings();
   const limitedListings = typeof limitSymbols === "number" ? listings.slice(0, limitSymbols) : listings;
 
-  const uniqueSymbols = limitedListings.map((l) => l.symbol);
-  uniqueSymbols.sort();
+  const yahooSymbols = limitedListings.map((listing) => buildYahooSymbol(listing));
+  const uniqueSymbols = Array.from(new Set(yahooSymbols.filter(Boolean))).sort();
 
   onProgress?.("listings:fetched", {
     totalListings: listings.length,
@@ -294,32 +495,41 @@ export async function syncYahooTickers(options: SyncOptions = {}): Promise<SyncY
   let missingMarketCapCount = 0;
 
   for (const listing of limitedListings) {
-    const quote = quoteMap.get(listing.symbol);
-    if (!quote) {
+    const yahooSymbol = buildYahooSymbol(listing);
+    const quote = quoteMap.get(yahooSymbol);
+
+    if (!quote && listing.source !== "euronext-scrape") {
       missingQuoteCount += 1;
       continue;
     }
 
-    const displayName = (quote.longName || quote.shortName || listing.name || listing.symbol).trim();
+    const displayName = (quote?.longName || quote?.shortName || listing.name || listing.symbol).trim();
     const marketCap =
-      typeof quote.marketCap === "number" && Number.isFinite(quote.marketCap) ? quote.marketCap : null;
+      typeof quote?.marketCap === "number" && Number.isFinite(quote.marketCap) ? quote.marketCap : null;
 
     if (!marketCap) {
       missingMarketCapCount += 1;
     }
 
+    const currency = quote?.currency ?? quote?.financialCurrency ?? listing.currency ?? null;
+    const exchange =
+      quote?.fullExchangeName ?? listing.exchange ?? (listing.mic === "XAMS" ? "Euronext Amsterdam" : null);
+    const instrumentType = quote?.quoteType ?? (listing.isEtf ? "ETF" : "EQUITY");
+    const isEtf = Boolean(listing.isEtf || (quote?.quoteType ?? "").toUpperCase() === "ETF");
+
     rowsToUpsert.push({
       symbol: listing.symbol,
       name: displayName,
-      exchange: quote.fullExchangeName ?? listing.exchange ?? null,
-      instrument_type: quote.quoteType ?? (listing.isEtf ? "ETF" : "EQUITY"),
-      is_etf: listing.isEtf || (quote.quoteType ?? "").toUpperCase() === "ETF",
+      exchange,
+      instrument_type: instrumentType,
+      is_etf: isEtf,
       market_cap: marketCap,
-      currency: quote.currency ?? quote.financialCurrency ?? null,
+      currency,
       source: listing.source,
       metadata: {
         listing,
-        quoteType: quote.quoteType ?? null,
+        quoteType: quote?.quoteType ?? null,
+        yahooSymbol,
       },
       updated_at: new Date().toISOString(),
     });

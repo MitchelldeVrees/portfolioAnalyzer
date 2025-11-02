@@ -22,13 +22,7 @@ export async function POST(request: NextRequest) {
       error: authError,
     } = await supabase.auth.getUser();
 
-    if (authError || !user) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-   
     
-
     const payload = await request.json().catch(() => ({}));
     const dryRun = Boolean(payload?.dryRun);
     const limitSymbols =

@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button"
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Plus, Upload, Edit3, BarChart3 } from "lucide-react"
+import { Plus, Edit3, BarChart3, Link as LinkIcon } from "lucide-react"
 import Link from "next/link"
 import { formatDistanceToNow } from "date-fns"
 
@@ -24,13 +24,13 @@ export function PortfolioList({ portfolios }: PortfolioListProps) {
       {/* Action Cards */}
       <div className="grid md:grid-cols-2 gap-6">
         <Card className="border-2 border-dashed border-slate-300 dark:border-slate-600 hover:border-blue-400 dark:hover:border-blue-500 transition-colors cursor-pointer">
-          <Link href="/dashboard/upload">
+          <Link href="/dashboard/connect">
             <CardHeader className="text-center py-8">
               <div className="mx-auto w-12 h-12 bg-blue-100 dark:bg-blue-900/30 rounded-xl flex items-center justify-center mb-4">
-                <Upload className="w-6 h-6 text-blue-600 dark:text-blue-400" />
+                <LinkIcon className="w-6 h-6 text-blue-600 dark:text-blue-400" />
               </div>
-              <CardTitle className="text-slate-900 dark:text-slate-100">Upload Portfolio</CardTitle>
-              <CardDescription>Import from Bloomberg Terminal exports, Excel, or CSV files with advanced field mapping</CardDescription>
+              <CardTitle className="text-slate-900 dark:text-slate-100">Connect Portfolio</CardTitle>
+              <CardDescription>Upload a CSV today or (soon) connect directly to your broker for live syncing</CardDescription>
             </CardHeader>
           </Link>
         </Card>

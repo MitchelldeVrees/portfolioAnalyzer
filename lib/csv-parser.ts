@@ -1,5 +1,5 @@
 // Enhanced CSV parser for Bloomberg exports and other financial data formats
-import { ColumnMappings, BloombergFieldMapping, BLOOMBERG_FIELD_MAPPINGS } from './bloomberg-mapping';
+import { ColumnMappings } from './upload-parsing';
 
 export interface ParsedHolding {
   ticker: string;
@@ -87,10 +87,9 @@ export function parseCSVContent(content: string, mappings: ColumnMappings): Pars
     }
     
     // Find column indices
-    const columnIndices: Record<string, number> = {};
-    
-    // Map all fields
-    Object.entries(mappings).forEach(([field, header]) => {
+    const columnIndices: Partial<Record<keyof ColumnMappings, number>> = {};
+
+    (Object.entries(mappings) as Array<[keyof ColumnMappings, string]>).forEach(([field, header]) => {
       if (header && header !== '') {
         const index = lowerHeaders.findIndex(h => h === header.toLowerCase());
         if (index !== -1) {
@@ -109,145 +108,57 @@ export function parseCSVContent(content: string, mappings: ColumnMappings): Pars
     // Parse data rows
     const holdings: ParsedHolding[] = [];
     
+    const parseNumericField = (value: string | undefined): number | undefined => {
+      if (!value) return undefined;
+      const cleaned = value.replace(/[$,\s%]/g, '');
+      const parsed = parseFloat(cleaned);
+      return Number.isNaN(parsed) ? undefined : parsed;
+    };
+
+    const parsePercentageField = (value: string | undefined): number | undefined => {
+      const numeric = parseNumericField(value);
+      if (numeric === undefined) return undefined;
+      return numeric > 1 ? numeric / 100 : numeric;
+    };
+
     for (let i = 1; i < lines.length; i++) {
       const values = lines[i].split(delimiter).map(v => v.trim().replace(/['"]/g, ''));
-      
-      if (values.length < rawHeaders.length) {
-        warnings.push(`Row ${i + 1}: Insufficient columns (expected ${rawHeaders.length}, got ${values.length})`);
+      const rowNumber = i;
+      const tickerIndex = columnIndices.ticker ?? -1;
+
+      if (tickerIndex < 0 || tickerIndex >= values.length) {
+        warnings.push(`Row ${rowNumber}: Missing ticker value.`);
         continue;
       }
-      
-      const ticker = values[columnIndices.ticker];
+
+      const ticker = values[tickerIndex];
       if (!ticker) {
-        warnings.push(`Row ${i + 1}: Empty ticker symbol`);
+        warnings.push(`Row ${rowNumber}: Empty ticker symbol`);
         continue;
       }
-      
+
       const holding: ParsedHolding = {
         ticker: ticker.toUpperCase().trim()
       };
-      
-      // Parse numeric fields
-      const parseNumericField = (field: string, value: string): number | undefined => {
-        if (!value) return undefined;
-        const cleaned = value.replace(/[$,\s%]/g, '');
-        const parsed = parseFloat(cleaned);
-        return isNaN(parsed) ? undefined : parsed;
-      };
-      
-      const parsePercentageField = (field: string, value: string): number | undefined => {
-        const num = parseNumericField(field, value);
-        if (num === undefined) return undefined;
-        // Convert percentage to decimal if > 1
-        return num > 1 ? num / 100 : num;
-      };
-      
-      // Map all fields
+
       if (columnIndices.weight !== undefined) {
-        const weight = parsePercentageField('weight', values[columnIndices.weight]);
+        const rawWeight = columnIndices.weight < values.length ? values[columnIndices.weight] : undefined;
+        const weight = parsePercentageField(rawWeight);
         if (weight !== undefined) holding.weight = weight;
       }
-      
+
       if (columnIndices.shares !== undefined) {
-        const shares = parseNumericField('shares', values[columnIndices.shares]);
+        const rawShares = columnIndices.shares < values.length ? values[columnIndices.shares] : undefined;
+        const shares = parseNumericField(rawShares);
         if (shares !== undefined) holding.shares = shares;
       }
-      
+
       if (columnIndices.purchasePrice !== undefined) {
-        const price = parseNumericField('purchasePrice', values[columnIndices.purchasePrice]);
+        const rawPrice = columnIndices.purchasePrice < values.length ? values[columnIndices.purchasePrice] : undefined;
+        const price = parseNumericField(rawPrice);
         if (price !== undefined) holding.purchasePrice = price;
       }
-      
-      if (columnIndices.marketPrice !== undefined) {
-        const price = parseNumericField('marketPrice', values[columnIndices.marketPrice]);
-        if (price !== undefined) holding.marketPrice = price;
-      }
-      
-      if (columnIndices.marketValue !== undefined) {
-        const value = parseNumericField('marketValue', values[columnIndices.marketValue]);
-        if (value !== undefined) holding.marketValue = value;
-      }
-      
-      if (columnIndices.costValue !== undefined) {
-        const value = parseNumericField('costValue', values[columnIndices.costValue]);
-        if (value !== undefined) holding.costValue = value;
-      }
-      
-      if (columnIndices.unrealizedPl !== undefined) {
-        const pl = parseNumericField('unrealizedPl', values[columnIndices.unrealizedPl]);
-        if (pl !== undefined) holding.unrealizedPl = pl;
-      }
-      
-      if (columnIndices.realizedPl !== undefined) {
-        const pl = parseNumericField('realizedPl', values[columnIndices.realizedPl]);
-        if (pl !== undefined) holding.realizedPl = pl;
-      }
-      
-      if (columnIndices.totalPl !== undefined) {
-        const pl = parseNumericField('totalPl', values[columnIndices.totalPl]);
-        if (pl !== undefined) holding.totalPl = pl;
-      }
-      
-      if (columnIndices.coupon !== undefined) {
-        const coupon = parsePercentageField('coupon', values[columnIndices.coupon]);
-        if (coupon !== undefined) holding.coupon = coupon;
-      }
-      
-      if (columnIndices.yieldToMaturity !== undefined) {
-        const ytm = parsePercentageField('yieldToMaturity', values[columnIndices.yieldToMaturity]);
-        if (ytm !== undefined) holding.yieldToMaturity = ytm;
-      }
-      
-      // Map text fields
-      if (columnIndices.securityName !== undefined) {
-        holding.securityName = values[columnIndices.securityName];
-      }
-      
-      if (columnIndices.isin !== undefined) {
-        holding.isin = values[columnIndices.isin];
-      }
-      
-      if (columnIndices.cusip !== undefined) {
-        holding.cusip = values[columnIndices.cusip];
-      }
-      
-      if (columnIndices.sedol !== undefined) {
-        holding.sedol = values[columnIndices.sedol];
-      }
-      
-      if (columnIndices.sector !== undefined) {
-        holding.sector = values[columnIndices.sector];
-      }
-      
-      if (columnIndices.country !== undefined) {
-        holding.country = values[columnIndices.country];
-      }
-      
-      if (columnIndices.assetType !== undefined) {
-        holding.assetType = values[columnIndices.assetType];
-      }
-      
-      if (columnIndices.accountId !== undefined) {
-        holding.accountId = values[columnIndices.accountId];
-      }
-      
-      if (columnIndices.portfolioName !== undefined) {
-        holding.portfolioName = values[columnIndices.portfolioName];
-      }
-      
-      // Map date fields
-      if (columnIndices.maturityDate !== undefined) {
-        holding.maturityDate = values[columnIndices.maturityDate];
-      }
-      
-      if (columnIndices.tradeDate !== undefined) {
-        holding.tradeDate = values[columnIndices.tradeDate];
-      }
-      
-      if (columnIndices.settlementDate !== undefined) {
-        holding.settlementDate = values[columnIndices.settlementDate];
-      }
-      
+
       holdings.push(holding);
     }
     
@@ -300,5 +211,3 @@ export function validateHoldings(holdings: ParsedHolding[]): { errors: string[];
   
   return { errors, warnings };
 }
-
-
