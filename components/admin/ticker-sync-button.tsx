@@ -5,6 +5,7 @@ import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { withCsrfHeaders } from "@/lib/security/csrf-client";
 
 type Props = {
   className?: string;
@@ -18,12 +19,15 @@ export function TickerSyncButton({ className }: Props) {
     setIsLoading(true);
 
     try {
-      const response = await fetch("/api/admin/yahoo-ticker-sync", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
+      const response = await fetch(
+        "/api/admin/yahoo-ticker-sync",
+        withCsrfHeaders({
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }),
+      );
 
       const payload = await response.json().catch(() => ({}));
 

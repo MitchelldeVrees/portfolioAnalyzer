@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { LucideIcon } from "lucide-react"
-import { createClient } from "@/lib/supabase/client"
 import {
   buildInitialColumnMappings,
   buildTickerCandidateList,
@@ -43,6 +42,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 export type UploadStep = "upload" | "validate" | "review" | "import" | "complete"
 
@@ -444,7 +444,6 @@ export function PortfolioUploadForm({
   onReviewContentChange,
 }: PortfolioUploadFormProps) {
   const router = useRouter()
-  const supabase = createClient()
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -916,27 +915,22 @@ export function PortfolioUploadForm({
     setResolutionSummary(null)
 
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-
-      if (!user) {
-        throw new Error("You need to be signed in to import a portfolio.")
-      }
-
-      const resolverResponse = await fetch("/api/tickers/resolve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          holdings: parsedData.map((holding) => ({
-            rowNumber: holding.rowNumber,
-            rawTicker: holding.rawTicker ?? holding.ticker,
-            ticker: holding.ticker,
-            candidates: holding.candidates,
-            identifiers: holding.identifiers,
-          })),
+      const resolverResponse = await fetch(
+        "/api/tickers/resolve",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            holdings: parsedData.map((holding) => ({
+              rowNumber: holding.rowNumber,
+              rawTicker: holding.rawTicker ?? holding.ticker,
+              ticker: holding.ticker,
+              candidates: holding.candidates,
+              identifiers: holding.identifiers,
+            })),
+          }),
         }),
-      })
+      )
 
       const resolverPayload = (await resolverResponse.json().catch(() => ({
         error: "Failed to resolve tickers",
@@ -1010,51 +1004,52 @@ export function PortfolioUploadForm({
         }
       }
 
-      const { data: portfolio, error: portfolioError } = await supabase
-        .from("portfolios")
-        .insert({
-          user_id: user.id,
-          name: portfolioName.trim(),
-          description: portfolioDescription.trim() || null,
-        })
-        .select()
-        .single()
-
-      if (portfolioError) throw portfolioError
-      if (!portfolio) throw new Error("Portfolio creation returned no data.")
-
-      const holdingsToInsert = parsedData.map((holding) => ({
-        portfolio_id: portfolio.id,
-        ticker: holding.ticker,
+      const holdingsPayload = parsedData.map((holding) => ({
+        ticker: holding.ticker?.toUpperCase() ?? "",
         weight: holding.weight ?? 0,
         shares: holding.shares ?? null,
-        purchase_price: holding.purchasePrice ?? null,
-        security_name: holding.securityName ?? null,
+        purchasePrice: holding.purchasePrice ?? null,
+        securityName: holding.securityName ?? null,
         isin: holding.isin ?? null,
         cusip: holding.cusip ?? null,
         sedol: holding.sedol ?? null,
-        market_value: holding.marketValue ?? null,
-        cost_value: holding.costValue ?? null,
-        unrealized_pl: holding.unrealizedPl ?? null,
-        realized_pl: holding.realizedPl ?? null,
-        total_pl: holding.totalPl ?? null,
+        marketValue: holding.marketValue ?? null,
+        costValue: holding.costValue ?? null,
+        unrealizedPl: holding.unrealizedPl ?? null,
+        realizedPl: holding.realizedPl ?? null,
+        totalPl: holding.totalPl ?? null,
         sector: holding.sector ?? null,
         country: holding.country ?? null,
-        asset_type: holding.assetType ?? null,
+        assetType: holding.assetType ?? null,
         coupon: holding.coupon ?? null,
-        maturity_date: holding.maturityDate ?? null,
-        yield_to_maturity: holding.yieldToMaturity ?? null,
-        trade_date: holding.tradeDate ?? null,
-        settlement_date: holding.settlementDate ?? null,
-        market_price: holding.marketPrice ?? null,
-        account_id: holding.accountId ?? null,
-        portfolio_name: holding.portfolioName ?? null,
+        maturityDate: holding.maturityDate ?? null,
+        yieldToMaturity: holding.yieldToMaturity ?? null,
+        tradeDate: holding.tradeDate ?? null,
+        settlementDate: holding.settlementDate ?? null,
+        marketPrice: holding.marketPrice ?? null,
+        accountId: holding.accountId ?? null,
+        portfolioName: holding.portfolioName ?? null,
       }))
 
-      const { error: holdingsError } = await supabase.from("portfolio_holdings").insert(holdingsToInsert)
-      if (holdingsError) throw holdingsError
+      const response = await fetch(
+        "/api/portfolios",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: portfolioName.trim(),
+            description: portfolioDescription.trim() || undefined,
+            holdings: holdingsPayload,
+          }),
+        }),
+      )
 
-      setCreatedPortfolio({ id: portfolio.id, name: portfolio.name ?? portfolioName.trim() })
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to import portfolio.")
+      }
+
+      setCreatedPortfolio({ id: payload.portfolioId, name: portfolioName.trim() })
       updateStep("complete")
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Failed to import portfolio.")
@@ -1062,16 +1057,7 @@ export function PortfolioUploadForm({
     } finally {
       setIsImporting(false)
     }
-  }, [
-    canImport,
-    errorCount,
-    parsedData,
-    portfolioDescription,
-    portfolioName,
-    router,
-    supabase,
-    updateStep,
-  ])
+  }, [canImport, errorCount, parsedData, portfolioDescription, portfolioName, router, updateStep])
 
   const reviewCardData = useMemo<ReviewCardProps | null>(() => {
     if (currentStep === "upload" || parsedData.length === 0) return null

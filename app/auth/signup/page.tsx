@@ -1,15 +1,12 @@
 "use client"
-
-import type React from "react"
-
-import { createClient } from "@/lib/supabase/client"
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { FormEvent, useState } from "react"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 export default function SignUpPage() {
   const [email, setEmail] = useState("")
@@ -20,9 +17,8 @@ export default function SignUpPage() {
   const [isLoading, setIsLoading] = useState(false)
   const router = useRouter()
 
-  const handleSignUp = async (e: React.FormEvent) => {
+  const handleSignUp = async (e: FormEvent) => {
     e.preventDefault()
-    const supabase = createClient()
     setIsLoading(true)
     setError(null)
 
@@ -33,17 +29,26 @@ export default function SignUpPage() {
     }
 
     try {
-      const { error } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            full_name: fullName,
-          },
-        },
-      })
-      if (error) throw error
-      router.push("/auth/verify-email")
+      const response = await fetch(
+        "/api/auth/signup",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password, fullName }),
+        }),
+      )
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to create account")
+      }
+
+      if (payload?.requiresEmailConfirmation) {
+        router.push("/auth/verify-email")
+      } else if (payload?.requiresMfa) {
+        router.push("/auth/mfa")
+      } else {
+        router.push("/dashboard")
+      }
     } catch (error: unknown) {
       setError(error instanceof Error ? error.message : "An error occurred")
     } finally {

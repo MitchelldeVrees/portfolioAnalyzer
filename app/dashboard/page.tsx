@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { PortfolioList } from "@/components/dashboard/portfolio-list"
 import { TickerSyncButton } from "@/components/admin/ticker-sync-button"
+import { getSessionRole } from "@/lib/security/session"
 
 export default async function DashboardPage() {
   const supabase = await createClient()
@@ -11,6 +12,9 @@ export default async function DashboardPage() {
   if (error || !data?.user) {
     redirect("/auth/login")
   }
+
+  const role = getSessionRole(data.user as any)
+  const isAdmin = role === "admin"
 
   // Get user's portfolios
   const { data: portfolios } = await supabase
@@ -34,7 +38,7 @@ export default async function DashboardPage() {
                 Upload, create, and analyze your investment portfolios
               </p>
             </div>
-            <TickerSyncButton /> 
+            {isAdmin && <TickerSyncButton />}
           </div>
           <PortfolioList portfolios={portfolios || []} />
         </div>

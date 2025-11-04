@@ -1,6 +1,7 @@
 // app/api/portfolio/[id]/summary/route.ts
 import { NextResponse } from "next/server"
 import { createServerClient } from "@/lib/supabase/server"
+import { CSRF_COOKIE_NAME, CSRF_HEADER_NAME } from "@/lib/security/csrf"
 
 type DataResponse = {
   holdings: Array<{
@@ -73,12 +74,21 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     const origin = `${url.protocol}//${url.host}`
     const benchmark = url.searchParams.get("benchmark") || "^GSPC"
 
+    const cookieHeader = req.headers.get("cookie") ?? ""
+    const csrfMatch = cookieHeader.match(new RegExp(`${CSRF_COOKIE_NAME}=([^;]+)`))
+    const headers: Record<string, string> = { cookie: cookieHeader }
+    if (csrfMatch) {
+      headers[CSRF_HEADER_NAME] = decodeURIComponent(csrfMatch[1])
+    }
+
     // pull your existing computed data (so we don't duplicate data access)
-    const dataRes = await fetch(`${origin}/api/portfolio/${params.id}/data?benchmark=${encodeURIComponent(benchmark)}`, {
-      // Forward cookies if needed:
-      headers: { cookie: (req.headers.get("cookie") ?? "") },
-      cache: "no-store",
-    })
+    const dataRes = await fetch(
+      `${origin}/api/portfolio/${params.id}/data?benchmark=${encodeURIComponent(benchmark)}`,
+      {
+        headers,
+        cache: "no-store",
+      },
+    )
     if (!dataRes.ok) {
       return NextResponse.json({ error: "Failed to load portfolio data" }, { status: 500 })
     }
@@ -272,6 +282,3 @@ export async function GET(req: Request, { params }: { params: { id: string } }) 
     return NextResponse.json({ error: "Unexpected error" }, { status: 500 })
   }
 }
-
-
-

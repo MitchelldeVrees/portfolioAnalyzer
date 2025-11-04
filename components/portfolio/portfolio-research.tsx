@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Spinner } from "@/components/ui/spinner"
 import { RefreshCcw } from "lucide-react"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 type ResearchResponse = {
   result: string
@@ -39,10 +40,12 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
         } else {
           setIsLoading(true)
         }
-        const res = await fetch(`/api/portfolio/${portfolioId}/research`, {
-          method: opts?.force ? "POST" : "GET",
-          headers: { "Content-Type": "application/json" },
-        })
+        const res = await fetch(
+          `/api/portfolio/${portfolioId}/research`,
+          opts?.force
+            ? withCsrfHeaders({ method: "POST", headers: { "Content-Type": "application/json" } })
+            : { method: "GET", headers: { "Content-Type": "application/json" } },
+        )
         if (!res.ok) {
           const payload = await res.json().catch(() => null)
           const message =

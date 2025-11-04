@@ -1,15 +1,13 @@
 "use client"
 
-import type React from "react"
-
-import { createClient } from "@/lib/supabase/client"
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useState } from "react"
+import { FormEvent, useState } from "react"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 export default function LoginPage() {
   const [email, setEmail] = useState("")
@@ -18,21 +16,32 @@ export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(false)
   const router = useRouter()
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: FormEvent) => {
     e.preventDefault()
-    const supabase = createClient()
     setIsLoading(true)
     setError(null)
 
     try {
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      })
-      if (error) throw error
-      router.push("/dashboard")
+      const response = await fetch(
+        "/api/auth/login",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+        }),
+      )
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to sign in")
+      }
+
+      if (payload?.requiresMfa) {
+        router.push("/auth/mfa")
+      } else {
+        router.push("/dashboard")
+      }
     } catch (error: unknown) {
-      setError(error instanceof Error ? error.message : "An error occurred")
+      setError(error instanceof Error ? error.message : "Unable to sign in")
     } finally {
       setIsLoading(false)
     }
