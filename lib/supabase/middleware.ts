@@ -21,7 +21,7 @@ type CookieMutation = {
   options?: ResponseCookie
 }
 
-const PUBLIC_PATHS = ["/", "/auth/login", "/auth/signup", "/auth/verify-email", "/auth/mfa"]
+const PUBLIC_PATHS = ["/", "/auth/login", "/auth/signup", "/auth/verify-email", "/auth/mfa", "/auth/mfa/setup"]
 
 function applyCookieMutations(response: NextResponse, mutations: CookieMutation[]) {
   for (const { name, value, options } of mutations) {
@@ -157,6 +157,17 @@ export async function updateSession(request: NextRequest) {
     }
 
     const currentRole = getSessionRole(user)
+    const metadata = user.app_metadata ?? {}
+    const mfaState = (metadata as any).mfa ?? {}
+    const hasTotp = Boolean(mfaState?.totp?.secret)
+    const credentials = mfaState?.webauthn?.credentials
+    const hasWebAuthn = Array.isArray(credentials) && credentials.length > 0
+    const securityMetadata = (metadata as any).security as { firstLoginComplete?: boolean } | undefined
+    const firstLoginComplete = Boolean(securityMetadata?.firstLoginComplete) || hasTotp || hasWebAuthn
+    const requiresFirstLoginSetup = !firstLoginComplete && !hasTotp && !hasWebAuthn
+    const isMfaSetupPath = request.nextUrl.pathname.startsWith("/auth/mfa/setup")
+    const isMfaApi = request.nextUrl.pathname.startsWith("/api/auth/mfa")
+    const isAuthApi = request.nextUrl.pathname.startsWith("/api/auth")
     let sessionRotated = false
 
     if (storedRole && storedRole !== currentRole) {
@@ -179,11 +190,23 @@ export async function updateSession(request: NextRequest) {
     const nextAal = storedAal === "aal2" ? "aal2" : "aal1"
     const nextMfaRequired = storedMfaRequired === "1" ? "1" : "0"
 
+    if (requiresFirstLoginSetup && !isMfaSetupPath && !isMfaApi && !isAuthApi) {
+      const url = request.nextUrl.clone()
+      url.pathname = "/auth/mfa/setup"
+      const redirect = NextResponse.redirect(url)
+      redirect.cookies.set(SESSION_ISSUED_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
+      redirect.cookies.set(SESSION_IDLE_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
+      redirect.cookies.set(SESSION_ROLE_COOKIE_NAME, currentRole, SESSION_COOKIE_OPTIONS)
+      redirect.cookies.set(SESSION_AAL_COOKIE_NAME, "aal1", SESSION_COOKIE_OPTIONS)
+      redirect.cookies.set(SESSION_MFA_REQUIRED_COOKIE_NAME, "1", SESSION_COOKIE_OPTIONS)
+      return setCsrfCookie(applyCookieMutations(redirect, cookieMutations))
+    }
+
     const requiresMfa = nextMfaRequired === "1" || currentRole === "admin"
     const isMfaPath = request.nextUrl.pathname.startsWith("/auth/mfa")
-    const isMfaApi = request.nextUrl.pathname.startsWith("/api/auth/mfa")
+    const isCurrentPathMfaApi = request.nextUrl.pathname.startsWith("/api/auth/mfa")
 
-    if (requiresMfa && nextAal !== "aal2" && !isMfaPath && !isMfaApi) {
+    if (requiresMfa && nextAal !== "aal2" && !isMfaPath && !isCurrentPathMfaApi) {
       const url = request.nextUrl.clone()
       url.pathname = "/auth/mfa"
       const redirect = NextResponse.redirect(url)

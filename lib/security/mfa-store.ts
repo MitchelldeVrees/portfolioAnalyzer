@@ -94,6 +94,7 @@ export async function readMfaState(userId: string) {
 export async function updateMfaState(
   userId: string,
   updater: (current: StoredMfaState, user: User) => StoredMfaState,
+  metadataUpdater?: (current: Record<string, unknown>, user: User) => Record<string, unknown> | void,
 ) {
   const admin = createAdminClient()
   const { data, error } = await admin.auth.admin.getUserById(userId)
@@ -103,8 +104,11 @@ export async function updateMfaState(
 
   const currentState = cloneState((data.user.app_metadata as any)?.mfa)
   const nextState = pruneState(updater(currentState, data.user) ?? {})
+  const currentAppMetadata = { ...(data.user.app_metadata ?? {}) }
+  const metadataUpdates = metadataUpdater ? metadataUpdater(currentAppMetadata, data.user) ?? {} : {}
   const nextAppMetadata = {
-    ...(data.user.app_metadata ?? {}),
+    ...currentAppMetadata,
+    ...metadataUpdates,
     mfa: nextState,
   }
 

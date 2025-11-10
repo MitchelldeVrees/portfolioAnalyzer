@@ -84,9 +84,12 @@ export async function POST(request: NextRequest) {
   const userRole = getSessionRole(user)
   const hasTotp = hasTotpFactor(state)
   const hasWebAuthn = hasWebAuthnFactor(state)
+  const securityMetadata = (user.app_metadata?.security ?? null) as { firstLoginComplete?: boolean } | null
+  const firstLoginComplete = Boolean(securityMetadata?.firstLoginComplete)
 
   const requiresMfa = userRole === "admin" || hasTotp || hasWebAuthn
   const needsEnrollment = userRole === "admin" && !hasTotp && !hasWebAuthn
+  const requiresFirstLoginSetup = !firstLoginComplete && !hasTotp && !hasWebAuthn
 
   const nowSeconds = Math.floor(Date.now() / 1000)
   const assuranceLevel: SessionAssuranceLevel = requiresMfa ? "aal1" : "aal2"
@@ -97,6 +100,7 @@ export async function POST(request: NextRequest) {
       ok: true,
       requiresMfa,
       needsEnrollment,
+      requiresFirstLoginSetup,
       mfa: toPublicMfaState(state),
     },
     { status: 200 },

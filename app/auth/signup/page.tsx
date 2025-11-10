@@ -44,6 +44,8 @@ export default function SignUpPage() {
 
       if (payload?.requiresEmailConfirmation) {
         router.push("/auth/verify-email")
+      } else if (payload?.requiresFirstLoginSetup) {
+        router.push("/auth/mfa/setup")
       } else if (payload?.requiresMfa) {
         router.push("/auth/mfa")
       } else {

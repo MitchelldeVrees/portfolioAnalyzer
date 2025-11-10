@@ -96,21 +96,46 @@ export async function POST(request: NextRequest) {
 
   const wasEnrollment = Boolean(pendingSecret)
 
-  const { state: nextState } = await updateMfaState(user.id, (current) => {
-    const next = { ...current }
-    const totp = { ...(current.totp ?? {}) }
+  const { state: nextState } = await updateMfaState(
+    user.id,
+    (current) => {
+      const next = { ...current }
+      const totp = { ...(current.totp ?? {}) }
 
-    if (wasEnrollment && totp.pendingSecret) {
-      totp.secret = totp.pendingSecret
-      delete totp.pendingSecret
-      totp.enrolledAt = new Date().toISOString()
-    }
+      if (wasEnrollment && totp.pendingSecret) {
+        totp.secret = totp.pendingSecret
+        delete totp.pendingSecret
+        totp.enrolledAt = new Date().toISOString()
+      }
 
-    totp.verified = true
-    next.totp = totp
+      totp.verified = true
+      next.totp = totp
 
-    return next
-  })
+      return next
+    },
+    wasEnrollment
+      ? (metadata) => {
+          const security =
+            metadata.security && typeof metadata.security === "object"
+              ? (metadata.security as Record<string, unknown>)
+              : {}
+
+          const completionTimestamp =
+            typeof security.firstLoginCompletedAt === "string"
+              ? security.firstLoginCompletedAt
+              : new Date().toISOString()
+
+          return {
+            ...metadata,
+            security: {
+              ...security,
+              firstLoginComplete: true,
+              firstLoginCompletedAt: completionTimestamp,
+            },
+          }
+        }
+      : undefined,
+  )
 
   const { error: refreshError } = await supabase.auth.refreshSession()
   if (refreshError) {

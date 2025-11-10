@@ -69,6 +69,9 @@ export async function GET(request: NextRequest) {
   const userRole = getSessionRole(user)
   const hasTotp = hasTotpFactor(state)
   const hasWebAuthn = hasWebAuthnFactor(state)
+  const securityMetadata = (user.app_metadata?.security ?? null) as { firstLoginComplete?: boolean } | null
+  const firstLoginComplete = Boolean(securityMetadata?.firstLoginComplete)
+  const requiresFirstLoginSetup = !firstLoginComplete && !hasTotp && !hasWebAuthn
 
   const response = NextResponse.json(
     {
@@ -76,6 +79,7 @@ export async function GET(request: NextRequest) {
       mfa: toPublicMfaState(state),
       requiresEnrollment: userRole === "admin" && !hasTotp && !hasWebAuthn,
       requiresMfa: userRole === "admin" || hasTotp || hasWebAuthn,
+      requiresFirstLoginSetup,
     },
     { status: 200 },
   )

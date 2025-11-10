@@ -82,6 +82,7 @@ export async function POST(request: NextRequest) {
   const nowSeconds = Math.floor(Date.now() / 1000)
   const role = getSessionRole(user)
   const requiresMfa = role === "admin"
+  const requiresFirstLoginSetup = Boolean(data.session)
   const assuranceLevel: SessionAssuranceLevel = requiresMfa ? "aal1" : "aal2"
   const mfaFlag = requiresMfa ? "1" : "0"
 
@@ -90,6 +91,7 @@ export async function POST(request: NextRequest) {
       ok: true,
       requiresEmailConfirmation: !data.session,
       requiresMfa,
+      requiresFirstLoginSetup,
       user: user ? { id: user.id, email: user.email } : null,
     },
     { status: 201 },
