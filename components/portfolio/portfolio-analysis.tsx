@@ -18,6 +18,7 @@ import { PortfolioResearch } from "./portfolio-research"
 import { useEffect, useState, useRef } from "react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
+import { DividendIncomeCard } from "./dividend-income-card"
 interface PortfolioHolding {
   id: string
   ticker: string
@@ -50,6 +51,8 @@ export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHo
   const skipInitialFetchRef = useRef(!!initialAnalysis)
   const [refreshingData, setRefreshingData] = useState(false)
   const [refreshError, setRefreshError] = useState<string | null>(null)
+  const dividendData = portfolioData?.dividends
+  const showDividendCard = Boolean(dividendData)
 
   useEffect(() => {
     let cancelled = false
@@ -499,13 +502,15 @@ export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHo
                 })}
               </CardContent>
             </Card>
-          </div>
+        </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Risk Analysis</CardTitle>
-            </CardHeader>
-            <CardContent>
+        {showDividendCard && dividendData && <DividendIncomeCard dividends={dividendData} />}
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Risk Analysis</CardTitle>
+          </CardHeader>
+          <CardContent>
               <div className="grid md:grid-cols-3 gap-6">
                 <div className="space-y-2">
                   <h4 className="font-medium text-slate-900 dark:text-slate-100">Concentration Risk</h4>

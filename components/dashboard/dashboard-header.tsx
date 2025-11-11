@@ -26,9 +26,12 @@ export function DashboardHeader({ user }: DashboardHeaderProps) {
               <Image src="/portifyNoBackground.png" alt="Portify logo" width={150} height={150} className="object-contain" />
             </Link>
             <div className="flex items-center space-x-4">
-              <span className="text-sm text-slate-600 dark:text-slate-400">
+              <Link
+                href="/account"
+                className="text-sm font-medium text-slate-600 transition hover:text-blue-600 dark:text-slate-300"
+              >
                 {user.email}
-              </span>
+              </Link>
               <Button variant="outline" onClick={handleSignOut}>
                 Sign Out
               </Button>

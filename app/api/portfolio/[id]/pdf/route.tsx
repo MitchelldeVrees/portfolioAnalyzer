@@ -79,12 +79,25 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       forwardHeaders[CSRF_HEADER_NAME] = decodeURIComponent(csrfMatch[1]);
     }
 
-    const [dataRes, researchRes] = await Promise.all([
+    const [dataResResult, researchResResult] = await Promise.allSettled([
       fetch(`${origin}/api/portfolio/${params.id}/data?benchmark=${encodeURIComponent(benchmark)}`, {
         headers: forwardHeaders,
       }),
       fetch(`${origin}/api/portfolio/${params.id}/research`, { headers: forwardHeaders }),
     ]);
+
+    if (dataResResult.status === "rejected") {
+      throw new PdfGenerationError(`Portfolio data request failed`, {
+        upstream: `/api/portfolio/${params.id}/data`,
+        publicMessage: dataResResult.reason?.message ?? "Portfolio analytics service unavailable.",
+      });
+    }
+
+    const dataRes = dataResResult.value as Response;
+    let research: any = null;
+    let researchWarning: string | null = null;
+    let researchMetaStatus: number | null = null;
+    let researchRunError: string | null = null;
 
     if (!dataRes.ok) {
       const body = await safeJson<{ error?: string }>(dataRes);
@@ -95,17 +108,38 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       });
     }
 
-    if (!researchRes.ok) {
-      const body = await safeJson<{ error?: string }>(researchRes);
-      throw new PdfGenerationError(`Research data request failed (${researchRes.status})`, {
-        status: researchRes.status,
-        upstream: `/api/portfolio/${params.id}/research`,
-        publicMessage: body?.error || "Research service temporarily unavailable.",
-      });
+    if (researchResResult.status === "fulfilled") {
+      const researchRes = researchResResult.value as Response;
+      if (researchRes.ok) {
+        research = await researchRes.json().catch(() => null);
+      } else {
+        const body = await safeJson<{ error?: string }>(researchRes);
+        researchMetaStatus = researchRes.status;
+        researchRunError = body?.error || `Research service returned ${researchRes.status}`;
+        researchWarning = body?.error || "Research service temporarily unavailable.";
+        console.warn("[pdf] continuing without research data", researchWarning);
+      }
+    } else {
+      const reason = researchResResult.reason;
+      researchWarning =
+        (reason instanceof Error ? reason.message : typeof reason === "string" ? reason : null) ||
+        "Research request failed";
+      console.warn("[pdf] research request rejected", researchWarning);
     }
 
     const data = await dataRes.json();
-    const research = await researchRes.json();
+    if (!research) {
+      research = {
+        tickers: [],
+        result: "",
+        generatedAt: new Date().toISOString(),
+        warning: researchWarning ?? "Research data unavailable.",
+        status: researchMetaStatus ?? undefined,
+        error: researchRunError ?? researchWarning ?? undefined,
+      };
+    } else if (researchWarning) {
+      research.warning = researchWarning;
+    }
 
     // 4) Branding assets
     const logoDataUri = await chartToDataUri(`${origin}/portify-logo.png`);

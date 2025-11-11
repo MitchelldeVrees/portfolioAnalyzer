@@ -1101,13 +1101,7 @@ export function PortfolioUploadForm({
         return null
       }
 
-      const cleanString = (value: unknown): string | null => {
-        if (typeof value !== "string") return null
-        const trimmed = value.trim()
-        return trimmed ? trimmed : null
-      }
-
-      const holdingsToInsert = resolvedHoldings
+      const holdingsPayload = resolvedHoldings
         .map((holding) => {
           const tickerSource = holding.ticker ?? holding.rawTicker ?? ""
           const ticker = typeof tickerSource === "string" ? tickerSource.trim().toUpperCase() : ""
@@ -1118,36 +1112,15 @@ export function PortfolioUploadForm({
           const purchasePriceValue = clampNumber(parseNumeric(holding.purchasePrice ?? null), 2)
 
           return {
-            portfolio_id: portfolio.id,
             ticker,
             weight: weightValue,
-            shares: sharesValue,
-            purchase_price: purchasePriceValue,
-            security_name: cleanString(holding.securityName),
-            isin: cleanString(holding.isin),
-            cusip: cleanString(holding.cusip),
-            sedol: cleanString(holding.sedol),
-            market_value: clampNumber(parseNumeric(holding.marketValue ?? null), 2),
-            cost_value: clampNumber(parseNumeric(holding.costValue ?? null), 2),
-            unrealized_pl: clampNumber(parseNumeric(holding.unrealizedPl ?? null), 2),
-            realized_pl: clampNumber(parseNumeric(holding.realizedPl ?? null), 2),
-            total_pl: clampNumber(parseNumeric(holding.totalPl ?? null), 2),
-            sector: cleanString(holding.sector),
-            country: cleanString(holding.country),
-            asset_type: cleanString(holding.assetType),
-            coupon: clampNumber(parseNumeric(holding.coupon ?? null), 4),
-            maturity_date: normalizeDateValue(holding.maturityDate),
-            yield_to_maturity: clampNumber(parseNumeric(holding.yieldToMaturity ?? null), 4),
-            trade_date: normalizeDateValue(holding.tradeDate),
-            settlement_date: normalizeDateValue(holding.settlementDate),
-            market_price: clampNumber(parseNumeric(holding.marketPrice ?? null), 2),
-            account_id: cleanString(holding.accountId),
-            portfolio_name: cleanString(holding.portfolioName),
+            shares: sharesValue ?? undefined,
+            purchasePrice: purchasePriceValue ?? undefined,
           }
         })
         .filter((holding): holding is NonNullable<typeof holding> => holding !== null)
 
-      if (!holdingsToInsert.length) {
+      if (!holdingsPayload.length) {
         throw new Error("No valid holdings to import after sanitization.")
       }
 
@@ -1156,12 +1129,12 @@ export function PortfolioUploadForm({
         withCsrfHeaders({
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: portfolioName.trim(),
-            description: portfolioDescription.trim() || undefined,
-            holdings: holdingsPayload,
+            body: JSON.stringify({
+              name: portfolioName.trim(),
+              description: portfolioDescription.trim() || undefined,
+              holdings: holdingsPayload,
+            }),
           }),
-        }),
       )
 
       const payload = await response.json()

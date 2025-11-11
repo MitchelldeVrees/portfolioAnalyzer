@@ -40,9 +40,37 @@ type PortfolioAnalysisSnapshot = {
     benchmark: string;
     refreshedAt: string;
   };
+  dividends?: DividendInsights | null;
+};
+
+type DividendTimelinePoint = {
+  key: string;
+  label: string;
+  amount: number;
+};
+
+type DividendEvent = {
+  ticker: string;
+  date: string;
+  amountPerShare: number;
+  shares: number;
+  cashAmount: number;
+  currency?: string | null;
+};
+
+type DividendInsights = {
+  year: number;
+  totalIncome: number;
+  monthlyTotals: DividendTimelinePoint[];
+  quarterlyTotals: DividendTimelinePoint[];
+  events: DividendEvent[];
 };
 
 const DEFAULT_BENCH = "^GSPC"; // Yahoo supports ^GSPC, ^NDX, etc.
+const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const QUARTER_LABELS = ["Q1", "Q2", "Q3", "Q4"];
+const MAX_DIVIDEND_TICKERS = 20;
+const DIVIDEND_FETCH_CONCURRENCY = 3;
 
 // ---------- utils & helpers ----------
 function clamp(x: number, lo: number, hi: number) {
@@ -384,6 +412,149 @@ async function persistAnalysisSnapshot(
   }
 }
 
+function parseYahooDate(input: any): Date | null {
+  if (!input) return null;
+  if (input instanceof Date) return input;
+  if (typeof input === "number") {
+    if (input > 1e12) return new Date(input);
+    if (input > 1e9) return new Date(input * 1000);
+  }
+  if (typeof input === "string") {
+    const parsed = Date.parse(input);
+    return Number.isNaN(parsed) ? null : new Date(parsed);
+  }
+  if (typeof input?.raw === "number") {
+    const raw = input.raw;
+    return raw > 1e12 ? new Date(raw) : new Date(raw * 1000);
+  }
+  return null;
+}
+
+async function fetchDividendHistory(ticker: string) {
+  try {
+    const end = new Date();
+    const start = new Date(end);
+    start.setFullYear(start.getFullYear() - 2);
+
+    const rows = await yahooFinance.historical(
+      ticker,
+      {
+        period1: start,
+        period2: end,
+        events: "dividends",
+      } as any,
+    );
+
+    const entries = Array.isArray(rows) ? rows : [];
+
+    return entries
+      .map((row: any) => {
+        const date = parseYahooDate(row?.date);
+        const rawAmount = row?.dividends ?? row?.amount ?? row?.adjclose ?? null;
+        const amount = typeof rawAmount === "number" ? rawAmount : Number(rawAmount ?? NaN);
+        if (!date || !Number.isFinite(amount) || amount <= 0) return null;
+        return {
+          date,
+          amount: Number(amount),
+          currency: row?.currency ?? null,
+        };
+      })
+      .filter(Boolean) as Array<{ date: Date; amount: number; currency?: string | null }>;
+  } catch (error) {
+    console.warn(`[dividends] failed to fetch history for ${ticker}:`, (error as Error)?.message ?? error);
+    return [];
+  }
+}
+
+async function fetchDividendEventsForTickers(tickers: string[]) {
+  const queue = Array.from(new Set(tickers));
+  if (!queue.length) return {} as Record<string, Array<{ date: Date; amount: number; currency?: string | null }>>;
+
+  const results: Record<string, Array<{ date: Date; amount: number; currency?: string | null }>> = {};
+  const workers = Array.from({ length: Math.min(DIVIDEND_FETCH_CONCURRENCY, queue.length) }).map(async () => {
+    while (queue.length) {
+      const next = queue.shift();
+      if (!next) break;
+      results[next] = await fetchDividendHistory(next);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+function buildMonthlyBuckets(events: DividendEvent[], year: number): DividendTimelinePoint[] {
+  return Array.from({ length: 12 }, (_, idx) => {
+    const key = `${year}-${String(idx + 1).padStart(2, "0")}`;
+    const label = MONTH_LABELS[idx];
+    const amount = events
+      .filter((event) => {
+        const date = new Date(event.date);
+        return date.getFullYear() === year && date.getMonth() === idx;
+      })
+      .reduce((sum, event) => sum + event.cashAmount, 0);
+    return { key, label, amount: Number(amount.toFixed(2)) };
+  });
+}
+
+function buildQuarterBuckets(monthly: DividendTimelinePoint[], year: number): DividendTimelinePoint[] {
+  return QUARTER_LABELS.map((label, index) => {
+    const slice = monthly.slice(index * 3, index * 3 + 3);
+    const amount = slice.reduce((sum, point) => sum + point.amount, 0);
+    return { key: `${year}-${label}`, label, amount: Number(amount.toFixed(2)) };
+  });
+}
+
+async function buildDividendInsights(holdingsData: Array<any>): Promise<DividendInsights | null> {
+  const dividendCandidates = holdingsData
+    .filter((holding) => Number(holding?.shares) > 0)
+    .sort((a, b) => b.totalValue - a.totalValue)
+    .slice(0, MAX_DIVIDEND_TICKERS);
+
+  if (!dividendCandidates.length) {
+    return null;
+  }
+
+  const tickers = dividendCandidates.map((holding) => holding.ticker);
+  const eventsByTicker = await fetchDividendEventsForTickers(tickers);
+  const currentYear = new Date().getFullYear();
+
+  const events: DividendEvent[] = [];
+  for (const holding of dividendCandidates) {
+    const history = eventsByTicker[holding.ticker] ?? [];
+    const rawShares = Number(holding.shares ?? 0);
+    const shares = Number(rawShares.toFixed(4));
+    for (const event of history) {
+      if (event.date.getFullYear() !== currentYear) continue;
+      const amountPerShare = Number(event.amount.toFixed(4));
+      const cashAmount = Number((amountPerShare * shares).toFixed(2));
+      if (cashAmount <= 0) continue;
+      events.push({
+        ticker: holding.ticker,
+        date: event.date.toISOString(),
+        amountPerShare,
+        shares,
+        cashAmount,
+        currency: event.currency ?? null,
+      });
+    }
+  }
+
+  events.sort((a, b) => a.date.localeCompare(b.date));
+
+  const monthlyTotals = buildMonthlyBuckets(events, currentYear);
+  const quarterlyTotals = buildQuarterBuckets(monthlyTotals, currentYear);
+  const totalIncome = Number(events.reduce((sum, event) => sum + event.cashAmount, 0).toFixed(2));
+
+  return {
+    year: currentYear,
+    totalIncome,
+    monthlyTotals,
+    quarterlyTotals,
+    events,
+  };
+}
+
 async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): Promise<PortfolioAnalysisSnapshot> {
   const holdings: Holding[] = Array.isArray(portfolio?.portfolio_holdings) ? portfolio.portfolio_holdings : [];
   const refreshedAt = new Date().toISOString();
@@ -442,6 +613,7 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
     return { ...h, ...q, totalValue, shares: qty };
   });
 
+  const dividendInsights = await buildDividendInsights(holdingsData);
   const totalValue = holdingsData.reduce((s, h) => s + h.totalValue, 0);
   const weights = holdingsData.map((h) => (totalValue > 0 ? h.totalValue / totalValue : 0));
   const dailyPortfolioReturn = holdingsData.reduce((sum, h) => sum + (h.changePercent * h.totalValue) / (totalValue || 1), 0);
@@ -610,6 +782,7 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
       diversification,
       beta: { level: betaLevel, value: Number(betaForRisk.toFixed(2)) },
     },
+    dividends: dividendInsights ?? null,
     meta: {
       benchmark: userBenchmark,
       refreshedAt,

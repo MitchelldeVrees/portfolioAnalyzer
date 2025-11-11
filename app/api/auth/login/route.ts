@@ -12,6 +12,7 @@ import {
   SessionAssuranceLevel,
   getSessionRole,
 } from "@/lib/security/session"
+import { MFA_ENABLED } from "@/lib/security/mfa-config"
 import {
   hasTotpFactor,
   hasWebAuthnFactor,
@@ -87,9 +88,9 @@ export async function POST(request: NextRequest) {
   const securityMetadata = (user.app_metadata?.security ?? null) as { firstLoginComplete?: boolean } | null
   const firstLoginComplete = Boolean(securityMetadata?.firstLoginComplete)
 
-  const requiresMfa = userRole === "admin" || hasTotp || hasWebAuthn
-  const needsEnrollment = userRole === "admin" && !hasTotp && !hasWebAuthn
-  const requiresFirstLoginSetup = !firstLoginComplete && !hasTotp && !hasWebAuthn
+  const requiresMfa = MFA_ENABLED && (userRole === "admin" || hasTotp || hasWebAuthn)
+  const needsEnrollment = MFA_ENABLED && userRole === "admin" && !hasTotp && !hasWebAuthn
+  const requiresFirstLoginSetup = MFA_ENABLED && !firstLoginComplete && !hasTotp && !hasWebAuthn
 
   const nowSeconds = Math.floor(Date.now() / 1000)
   const assuranceLevel: SessionAssuranceLevel = requiresMfa ? "aal1" : "aal2"
