@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
-import { createClient } from "@/lib/supabase/client"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -10,6 +9,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Plus, Trash2, AlertCircle, Calculator, Save } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 type DBHolding = {
   id: string
@@ -36,7 +36,6 @@ type Holding = {
 
 export function EditPortfolioForm({ portfolio }: { portfolio: DBPortfolio }) {
   const router = useRouter()
-  const supabase = createClient()
 
   const [portfolioName, setPortfolioName] = useState("")
   const [portfolioDescription, setPortfolioDescription] = useState<string>("")
@@ -107,39 +106,31 @@ export function EditPortfolioForm({ portfolio }: { portfolio: DBPortfolio }) {
     if (!validateForm()) return
     setIsSaving(true)
     try {
-      // Update portfolio metadata
-      const { error: updateError } = await supabase
-        .from("portfolios")
-        .update({ name: portfolioName.trim(), description: portfolioDescription.trim() || null })
-        .eq("id", portfolio.id)
-
-      if (updateError) throw updateError
-
-      // Replace holdings: delete existing and insert new
-      const { error: deleteError } = await supabase
-        .from("portfolio_holdings")
-        .delete()
-        .eq("portfolio_id", portfolio.id)
-
-      if (deleteError) throw deleteError
-
       const prepared = holdings
         .filter((h) => h.ticker.trim() && (h.weight ?? 0) > 0)
         .map((h) => ({
-          portfolio_id: portfolio.id,
           ticker: h.ticker.toUpperCase().trim(),
-          weight: ((): number => {
-            // If user entered percents (~100 total), convert to decimals; else assume already decimals
-            if (totalWeight > 50) return (h.weight || 0) / 100
-            return h.weight || 0
-          })(),
+          weight: totalWeight > 50 ? (h.weight || 0) / 100 : h.weight || 0,
           shares: h.shares ?? null,
-          purchase_price: h.purchasePrice ?? null,
+          purchasePrice: h.purchasePrice ?? null,
         }))
 
-      if (prepared.length > 0) {
-        const { error: insertError } = await supabase.from("portfolio_holdings").insert(prepared)
-        if (insertError) throw insertError
+      const response = await fetch(
+        `/api/portfolios/${portfolio.id}`,
+        withCsrfHeaders({
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: portfolioName.trim(),
+            description: portfolioDescription.trim() || undefined,
+            holdings: prepared,
+          }),
+        }),
+      )
+
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to update portfolio")
       }
 
       router.push(`/dashboard/portfolio/${portfolio.id}`)
@@ -310,4 +301,3 @@ export function EditPortfolioForm({ portfolio }: { portfolio: DBPortfolio }) {
     </div>
   )
 }
-

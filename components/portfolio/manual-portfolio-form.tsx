@@ -2,7 +2,6 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import { createClient } from "@/lib/supabase/client"
 import { Button } from "@/components/ui/button"
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -12,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Plus, Trash2, AlertCircle, Calculator } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { TickerAutocomplete } from "./ticker-autocomplete"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 interface Holding {
   id: string
@@ -29,7 +29,6 @@ export function ManualPortfolioForm() {
   const [error, setError] = useState<string | null>(null)
 
   const router = useRouter()
-  const supabase = createClient()
 
   const addHolding = () => {
     const newHolding: Holding = {
@@ -103,41 +102,33 @@ export function ManualPortfolioForm() {
     setIsLoading(true)
 
     try {
-      const {
-        data: { user },
-      } = await supabase.auth.getUser()
-      if (!user) throw new Error("Not authenticated")
-
-      // Create portfolio
-      const { data: portfolio, error: portfolioError } = await supabase
-        .from("portfolios")
-        .insert({
-          user_id: user.id,
-          name: portfolioName.trim(),
-          description: portfolioDescription.trim() || null,
-        })
-        .select()
-        .single()
-
-      if (portfolioError) throw portfolioError
-
-      // Prepare holdings data
       const validHoldings = holdings.filter((h) => h.ticker.trim() && h.weight > 0)
       const totalWeight = getTotalWeight()
 
-      const holdingsData = validHoldings.map((holding) => ({
-        portfolio_id: portfolio.id,
-        ticker: holding.ticker.toUpperCase().trim(),
-        weight: totalWeight > 50 ? holding.weight / 100 : holding.weight, // Handle percentage vs decimal
-        shares: holding.shares || null,
-        purchase_price: holding.purchasePrice || null,
-      }))
+      const response = await fetch(
+        "/api/portfolios",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: portfolioName.trim(),
+            description: portfolioDescription.trim() || undefined,
+            holdings: validHoldings.map((holding) => ({
+              ticker: holding.ticker.toUpperCase().trim(),
+              weight: totalWeight > 50 ? holding.weight / 100 : holding.weight,
+              shares: holding.shares ?? null,
+              purchasePrice: holding.purchasePrice ?? null,
+            })),
+          }),
+        }),
+      )
 
-      const { error: holdingsError } = await supabase.from("portfolio_holdings").insert(holdingsData)
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to create portfolio")
+      }
 
-      if (holdingsError) throw holdingsError
-
-      router.push(`/dashboard/portfolio/${portfolio.id}`)
+      router.push(`/dashboard/portfolio/${payload.portfolioId}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create portfolio")
     } finally {
@@ -317,4 +308,3 @@ export function ManualPortfolioForm() {
     </div>
   )
 }
-

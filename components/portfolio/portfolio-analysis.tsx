@@ -17,6 +17,7 @@ import { PortfolioSummaryReport } from "./portfolio-summary-report"
 import { PortfolioResearch } from "./portfolio-research"
 import { useEffect, useState, useRef } from "react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 interface PortfolioHolding {
   id: string
   ticker: string
@@ -83,22 +84,28 @@ export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHo
     try {
       const payload = JSON.stringify({ benchmark })
 
-      const holdingsResponse = await fetch(`/api/portfolio/${portfolio.id}/holdings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: payload,
-      })
+      const holdingsResponse = await fetch(
+        `/api/portfolio/${portfolio.id}/holdings`,
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        }),
+      )
       if (!holdingsResponse.ok) {
         const errorBody = await holdingsResponse.json().catch(() => null)
         const message = errorBody?.error || `Failed to refresh holdings (${holdingsResponse.status})`
         throw new Error(message)
       }
 
-      const analysisResponse = await fetch(`/api/portfolio/${portfolio.id}/data`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: payload,
-      })
+      const analysisResponse = await fetch(
+        `/api/portfolio/${portfolio.id}/data`,
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+        }),
+      )
       if (!analysisResponse.ok) {
         const errorBody = await analysisResponse.json().catch(() => null)
         const message = errorBody?.error || `Failed to refresh analysis (${analysisResponse.status})`
@@ -594,8 +601,6 @@ export function PortfolioAnalysis({ portfolio, initialAnalysis = null, initialHo
     </div>
   )
 }
-
-
 
 
 

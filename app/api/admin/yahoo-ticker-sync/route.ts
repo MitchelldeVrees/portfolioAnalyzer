@@ -1,17 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { syncYahooTickers } from "@/lib/tickers/sync-yahoo-tickers";
+import { getSessionRole } from "@/lib/security/session";
 
 export const runtime = "nodejs";
 
-function isAuthorizedEmail(email: string | null | undefined) {
+function isAuthorized(email: string | null | undefined) {
   if (!email) return false;
-  const allowList = (process.env.TICKER_SYNC_ALLOWED_EMAILS || "")
+  const listEnv = [
+    process.env.ADMIN_EMAILS,
+    (process.env as any).admin_emails as string | undefined,
+    process.env.TICKER_SYNC_ALLOWED_EMAILS,
+  ]
+    .filter(Boolean)
+    .join(",");
+  const allow = (listEnv || "")
     .split(",")
-    .map((entry) => entry.trim().toLowerCase())
+    .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
-  if (allowList.length === 0) return false;
-  return allowList.includes(email.toLowerCase());
+  return allow.includes(email.toLowerCase());
 }
 
 export async function POST(request: NextRequest) {
@@ -22,7 +29,10 @@ export async function POST(request: NextRequest) {
       error: authError,
     } = await supabase.auth.getUser();
 
-    
+    if (authError || !user || (!isAuthorized(user.email) && getSessionRole(user as any) !== "admin")) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     const payload = await request.json().catch(() => ({}));
     const dryRun = Boolean(payload?.dryRun);
     const limitSymbols =

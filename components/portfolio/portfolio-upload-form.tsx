@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { LucideIcon } from "lucide-react"
-import { createClient } from "@/lib/supabase/client"
 import {
   buildInitialColumnMappings,
   buildTickerCandidateList,
@@ -43,6 +42,7 @@ import {
   Sparkles,
   Upload,
 } from "lucide-react"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 export type UploadStep = "upload" | "validate" | "review" | "import" | "complete"
 
@@ -444,7 +444,6 @@ export function PortfolioUploadForm({
   onReviewContentChange,
 }: PortfolioUploadFormProps) {
   const router = useRouter()
-  const supabase = createClient()
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -1152,10 +1151,25 @@ export function PortfolioUploadForm({
         throw new Error("No valid holdings to import after sanitization.")
       }
 
-      const { error: holdingsError } = await supabase.from("portfolio_holdings").insert(holdingsToInsert)
-      if (holdingsError) throw holdingsError
+      const response = await fetch(
+        "/api/portfolios",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: portfolioName.trim(),
+            description: portfolioDescription.trim() || undefined,
+            holdings: holdingsPayload,
+          }),
+        }),
+      )
 
-      setCreatedPortfolio({ id: portfolio.id, name: portfolio.name ?? portfolioName.trim() })
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to import portfolio.")
+      }
+
+      setCreatedPortfolio({ id: payload.portfolioId, name: portfolioName.trim() })
       updateStep("complete")
       insertedPortfolioId = null
     } catch (error) {
@@ -1167,16 +1181,7 @@ export function PortfolioUploadForm({
     } finally {
       setIsImporting(false)
     }
-  }, [
-    canImport,
-    errorCount,
-    parsedData,
-    portfolioDescription,
-    portfolioName,
-    router,
-    supabase,
-    updateStep,
-  ])
+  }, [canImport, errorCount, parsedData, portfolioDescription, portfolioName, router, updateStep])
 
   const reviewCardData = useMemo<ReviewCardProps | null>(() => {
     if (currentStep === "upload" || parsedData.length === 0) return null

@@ -1,11 +1,10 @@
 "use client"
-
-import { createClient } from "@/lib/supabase/client"
 import { Button } from "@/components/ui/button"
 import { useRouter } from "next/navigation"
-import type { User } from "@supabase/supabase-js"
 import Image from "next/image"
 import Link from "next/link"
+import type { User } from "@supabase/supabase-js"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 interface DashboardHeaderProps {
   user: User
@@ -13,10 +12,9 @@ interface DashboardHeaderProps {
 
 export function DashboardHeader({ user }: DashboardHeaderProps) {
   const router = useRouter()
-  const supabase = createClient()
 
   const handleSignOut = async () => {
-    await supabase.auth.signOut()
+    await fetch("/api/auth/logout", withCsrfHeaders({ method: "POST" }))
     router.push("/")
   }
 

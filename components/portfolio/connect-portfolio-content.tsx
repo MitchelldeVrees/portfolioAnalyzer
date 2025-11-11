@@ -15,6 +15,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Upload, Link as LinkIcon, Info, HelpCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { SnaptradeConnectCard } from "@/components/integrations/snaptrade-connect-card"
 
 const SAMPLE_ROWS = [
   { ticker: "AAPL", weight: "0.12", shares: "150", price: "$165.40" },
@@ -76,16 +77,29 @@ export function ConnectPortfolioContent() {
         </Card>
 
         <Card
-          aria-disabled="true"
-          className="border-2 border-dashed border-slate-200 bg-slate-100/70 text-slate-500 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-400"
+          role="button"
+          tabIndex={0}
+          onClick={() => setActiveOption("broker")}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault()
+              setActiveOption("broker")
+            }
+          }}
+          className={cn(
+            "border-2 border-dashed transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2",
+            activeOption === "broker"
+              ? "border-blue-500 bg-blue-50/40 dark:border-blue-500/70 dark:bg-blue-500/10"
+              : "border-blue-200 hover:border-blue-400 dark:border-blue-900/50 dark:hover:border-blue-700",
+          )}
         >
           <CardHeader className="space-y-3 text-center">
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-slate-200 dark:bg-slate-800">
-              <LinkIcon className="h-6 w-6" />
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 dark:bg-blue-900/30">
+              <LinkIcon className="h-6 w-6 text-blue-600 dark:text-blue-400" />
             </div>
-            <CardTitle className="text-base">Connect your broker</CardTitle>
-            <CardDescription className="text-xs text-slate-500 dark:text-slate-400">
-              Coming soon — securely sync holdings straight from your custodian for always-on AI insights.
+            <CardTitle className="text-slate-900 dark:text-slate-100">Connect your broker</CardTitle>
+            <CardDescription className="text-sm">
+              Launch the SnapTrade flow to select Interactive Brokers and other supported custodians.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -94,7 +108,7 @@ export function ConnectPortfolioContent() {
       {activeOption === "none" && (
         <Card className="border-slate-200 bg-white text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
           <CardContent className="py-6 text-center">
-            Select an option above to get started. Upload a CSV today or check back soon for direct broker connections.
+            Select an option above to get started. Upload a CSV today or connect your broker to sync holdings automatically.
           </CardContent>
         </Card>
       )}
@@ -281,6 +295,8 @@ export function ConnectPortfolioContent() {
           )}
         </div>
       )}
+
+      {activeOption === "broker" && <SnaptradeConnectCard />}
     </div>
   )
 }

@@ -6,6 +6,7 @@ import { LoadingButton } from "@/components/ui/loading-button"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
 import { FileDown } from "lucide-react"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 type DataResponse = {
   holdings: Array<{
@@ -82,7 +83,7 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
   const handleDownload = async () => {
     try {
       setIsDownloading(true)
-      const res = await fetch(`/api/portfolio/${portfolioId}/pdf`, { method: "POST" })
+      const res = await fetch(`/api/portfolio/${portfolioId}/pdf`, withCsrfHeaders({ method: "POST" }))
       if (!res.ok) throw new Error("Failed to generate report")
       const { html, filename } = await res.json()
       const blob = new Blob([html], { type: "text/html;charset=utf-8" })

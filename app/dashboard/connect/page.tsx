@@ -19,7 +19,7 @@ export default async function ConnectPortfolioPage() {
           <div className="space-y-2">
             <h1 className="text-3xl font-bold text-slate-900 dark:text-slate-100">Connect your portfolio</h1>
             <p className="text-slate-600 dark:text-slate-400">
-              Upload a CSV export today. Broker connections are on the roadmap, so you’ll soon be able to sync your holdings automatically.
+              Upload a CSV export or launch the SnapTrade broker connection flow to sync holdings directly from Interactive Brokers and other supported custodians.
             </p>
           </div>
 

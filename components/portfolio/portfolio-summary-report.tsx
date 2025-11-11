@@ -28,6 +28,7 @@ import {
 } from "lucide-react"
 import { format } from "date-fns"
 import { toast } from "@/hooks/use-toast"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 interface PortfolioHolding {
   id: string
@@ -258,11 +259,14 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
     setIsGenerating(true)
     const start = typeof performance !== "undefined" ? performance.now() : Date.now()
     try {
-      const response = await fetch(`/api/portfolio/${portfolio.id}/pdf`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ benchmark }),
-      })
+      const response = await fetch(
+        `/api/portfolio/${portfolio.id}/pdf`,
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ benchmark }),
+        }),
+      )
       if (!response.ok) {
         const errBody = await response.json().catch(() => ({}))
         const message = errBody?.error || `Failed to generate PDF (status ${response.status})`

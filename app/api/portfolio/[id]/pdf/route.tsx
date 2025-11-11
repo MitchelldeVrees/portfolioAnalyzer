@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { getDailyHistoryAdjClose, toDailyReturns, getFundamentals, getMarketCaps } from "./yahooFinanceUtils";
 import { corr, stddev, harmonicMean, alignByDate } from "./statsUtils";
 import { chartToDataUri } from "./chartUtils";
+import { CSRF_COOKIE_NAME, CSRF_HEADER_NAME } from "@/lib/security/csrf";
 import { generateProfessionalPDFHTML } from "./pdfTemplate";
 import { getSectorForTicker, normSectorName, SECTOR_LEADERS } from "./sectorUtils";
 
@@ -71,10 +72,19 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     const origin = new URL(request.url).origin;
     const cookieHeader = request.headers.get("cookie") || "";
 
-    // 3) Get analysis data
-    const dataRes = await fetch(`${origin}/api/portfolio/${params.id}/data?benchmark=${encodeURIComponent(benchmark)}`, {
-      headers: { cookie: cookieHeader },
-    });
+    // 3) Get analysis data & research
+    const csrfMatch = cookieHeader.match(new RegExp(`${CSRF_COOKIE_NAME}=([^;]+)`));
+    const forwardHeaders: Record<string, string> = { cookie: cookieHeader };
+    if (csrfMatch) {
+      forwardHeaders[CSRF_HEADER_NAME] = decodeURIComponent(csrfMatch[1]);
+    }
+
+    const [dataRes, researchRes] = await Promise.all([
+      fetch(`${origin}/api/portfolio/${params.id}/data?benchmark=${encodeURIComponent(benchmark)}`, {
+        headers: forwardHeaders,
+      }),
+      fetch(`${origin}/api/portfolio/${params.id}/research`, { headers: forwardHeaders }),
+    ]);
 
     if (!dataRes.ok) {
       const body = await safeJson<{ error?: string }>(dataRes);
@@ -457,6 +467,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       ...portfolio,
       profile,
       data,
+      research,
       benchmark,
       charts: { performanceChartUri, allocationChartUri },
       branding: brand,
@@ -505,6 +516,5 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     return NextResponse.json({ error: "Failed to generate PDF" }, { status: 500 });
   }
 }
-
 
 
