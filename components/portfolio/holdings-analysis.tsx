@@ -111,6 +111,11 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
     return "text-slate-600 dark:text-slate-400"
   }
 
+  const formatNumber = (value: number | null | undefined, decimals = 2) => {
+    if (typeof value !== "number" || Number.isNaN(value)) return "-"
+    return value.toFixed(decimals)
+  }
+
   // Use composite risk score buckets
   const getRiskLevel = (riskScore?: number | null) => {
     const v = typeof riskScore === "number" ? riskScore : null
@@ -347,7 +352,7 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
                   <DialogTitle className="flex items-center justify-between">
                     <span>
                       {selected.ticker} - Risk score{" "}
-                      <span className="font-mono">{selected.riskScore}</span>
+                      <span className="font-mono">{formatNumber(selected.riskScore)}</span>
                     </span>
                     <Badge variant="outline" className="ml-3">
                       {getRiskLevel(selected.riskScore).level}
@@ -389,8 +394,8 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
                             <div className="mt-2 grid gap-2 md:grid-cols-3">
                               <div className="col-span-2">
                                 <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
-                                  <span>score {c.score}</span>
-                                  <span>impact {impact.toFixed(1)}</span>
+                                  <span>score {formatNumber(c.score)}</span>
+                                  <span>impact {formatNumber(impact)}</span>
                                 </div>
                                 <div className="mt-1 h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
                                   <motion.div
@@ -404,7 +409,7 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
                               <div className="text-xs md:text-right text-slate-600 dark:text-slate-400">
                                 raw value:&nbsp;
                                 <span className="font-mono text-slate-900 dark:text-slate-100">
-                                  {c.value ?? "-"}
+                                  {typeof c.value === "number" ? formatNumber(c.value) : c.value ?? "-"}
                                 </span>
                               </div>
                             </div>
@@ -417,7 +422,7 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
                   <div className="mt-6 rounded-2xl border p-4 bg-slate-50 dark:bg-slate-900/40">
                     <div className="flex items-center justify-between">
                       <div className="text-sm text-slate-600 dark:text-slate-400">Total</div>
-                      <div className="font-bold text-lg font-mono">{selected.riskScore ?? "-"}</div>
+                      <div className="font-bold text-lg font-mono">{formatNumber(selected.riskScore)}</div>
                     </div>
                   </div>
                 </ScrollArea>

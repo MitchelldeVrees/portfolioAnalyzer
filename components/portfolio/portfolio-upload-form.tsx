@@ -914,23 +914,30 @@ export function PortfolioUploadForm({
     setErrorMessage(null)
     setResolutionSummary(null)
 
+    let insertedPortfolioId: string | null = null
+
     try {
-      const resolverResponse = await fetch(
-        "/api/tickers/resolve",
-        withCsrfHeaders({
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            holdings: parsedData.map((holding) => ({
-              rowNumber: holding.rowNumber,
-              rawTicker: holding.rawTicker ?? holding.ticker,
-              ticker: holding.ticker,
-              candidates: holding.candidates,
-              identifiers: holding.identifiers,
-            })),
-          }),
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+
+      if (!user) {
+        throw new Error("You need to be signed in to import a portfolio.")
+      }
+
+      const resolverResponse = await fetch("/api/tickers/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          holdings: parsedData.map((holding) => ({
+            rowNumber: holding.rowNumber,
+            rawTicker: holding.rawTicker ?? holding.ticker,
+            ticker: holding.ticker,
+            candidates: holding.candidates,
+            identifiers: holding.identifiers,
+          })),
         }),
-      )
+      })
 
       const resolverPayload = (await resolverResponse.json().catch(() => ({
         error: "Failed to resolve tickers",
@@ -950,23 +957,23 @@ export function PortfolioUploadForm({
         resolutionByRow.set(record.rowNumber, record)
       })
 
-      setParsedData((previous) =>
-        previous.map((holding) => {
-          const resolution = resolutionByRow.get(holding.rowNumber)
-          if (!resolution) return holding
-          return {
-            ...holding,
-            ticker: resolution.resolvedTicker,
-            resolution: {
-              resolvedTicker: resolution.resolvedTicker,
-              source: resolution.source,
-              confidence: resolution.confidence,
-              usedIdentifier: resolution.usedIdentifier,
-              note: resolution.note,
-            },
-          }
-        }),
-      )
+      const resolvedHoldings = parsedData.map((holding) => {
+        const resolution = resolutionByRow.get(holding.rowNumber)
+        if (!resolution) return holding
+        return {
+          ...holding,
+          ticker: resolution.resolvedTicker,
+          resolution: {
+            resolvedTicker: resolution.resolvedTicker,
+            source: resolution.source,
+            confidence: resolution.confidence,
+            usedIdentifier: resolution.usedIdentifier,
+            note: resolution.note,
+          },
+        }
+      })
+
+      setParsedData(resolvedHoldings)
 
       if (unresolvedRecords.length > 0) {
         const unresolvedSummary = unresolvedRecords
@@ -1004,44 +1011,130 @@ export function PortfolioUploadForm({
         }
       }
 
-      const holdingsPayload = parsedData.map((holding) => ({
-        ticker: holding.ticker?.toUpperCase() ?? "",
-        weight: holding.weight ?? 0,
-        shares: holding.shares ?? null,
-        purchasePrice: holding.purchasePrice ?? null,
-        securityName: holding.securityName ?? null,
-        isin: holding.isin ?? null,
-        cusip: holding.cusip ?? null,
-        sedol: holding.sedol ?? null,
-        marketValue: holding.marketValue ?? null,
-        costValue: holding.costValue ?? null,
-        unrealizedPl: holding.unrealizedPl ?? null,
-        realizedPl: holding.realizedPl ?? null,
-        totalPl: holding.totalPl ?? null,
-        sector: holding.sector ?? null,
-        country: holding.country ?? null,
-        assetType: holding.assetType ?? null,
-        coupon: holding.coupon ?? null,
-        maturityDate: holding.maturityDate ?? null,
-        yieldToMaturity: holding.yieldToMaturity ?? null,
-        tradeDate: holding.tradeDate ?? null,
-        settlementDate: holding.settlementDate ?? null,
-        marketPrice: holding.marketPrice ?? null,
-        accountId: holding.accountId ?? null,
-        portfolioName: holding.portfolioName ?? null,
-      }))
+      const { data: portfolio, error: portfolioError } = await supabase
+        .from("portfolios")
+        .insert({
+          user_id: user.id,
+          name: portfolioName.trim(),
+          description: portfolioDescription.trim() || null,
+        })
+        .select()
+        .single()
+
+      if (portfolioError) throw portfolioError
+      if (!portfolio) throw new Error("Portfolio creation returned no data.")
+      insertedPortfolioId = portfolio.id
+
+      const clampNumber = (value: number | null, scale: number): number | null => {
+        if (value === null) return null
+        if (!Number.isFinite(value)) return null
+        return Number.parseFloat(value.toFixed(scale))
+      }
+
+      const parseNumeric = (value: unknown): number | null => {
+        if (typeof value === "number") {
+          return Number.isFinite(value) ? value : null
+        }
+        if (typeof value === "string") {
+          const trimmed = value.trim()
+          if (!trimmed) return null
+          const normalised = trimmed.replace(/[^0-9.\-]/g, "")
+          const parsed = Number.parseFloat(normalised)
+          return Number.isFinite(parsed) ? parsed : null
+        }
+        return null
+      }
+
+      const normalizeWeight = (value: unknown): number => {
+        const numeric = parseNumeric(value)
+        if (numeric === null || numeric < 0) return 0
+        if (numeric > 1 && numeric <= 100) return numeric / 100
+        if (numeric > 1) return 1
+        return numeric
+      }
+
+      const normalizeDateValue = (value: unknown): string | null => {
+        if (!value) return null
+        if (value instanceof Date && !Number.isNaN(value.getTime())) {
+          return value.toISOString().slice(0, 10)
+        }
+        if (typeof value === "string") {
+          const trimmed = value.trim()
+          if (!trimmed) return null
+
+          const isoMatch = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/)
+          if (isoMatch) {
+            const [, year, month, day] = isoMatch
+            const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)))
+            if (!Number.isNaN(date.getTime())) {
+              return date.toISOString().slice(0, 10)
+            }
+          }
+
+          const shortIsoMatch = trimmed.match(/^(\d{8})$/)
+          if (shortIsoMatch) {
+            const digits = shortIsoMatch[1]
+            const year = Number(digits.slice(0, 4))
+            const month = Number(digits.slice(4, 6))
+            const day = Number(digits.slice(6, 8))
+            const date = new Date(Date.UTC(year, month - 1, day))
+            if (!Number.isNaN(date.getTime())) {
+              return date.toISOString().slice(0, 10)
+            }
+          }
+
+          const euroMatch = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/)
+          if (euroMatch) {
+            const [, day, month, yearDigits] = euroMatch
+            const year = yearDigits.length === 2 ? Number(`20${yearDigits}`) : Number(yearDigits)
+            const date = new Date(Date.UTC(year, Number(month) - 1, Number(day)))
+            if (!Number.isNaN(date.getTime())) {
+              return date.toISOString().slice(0, 10)
+            }
+          }
+
+          const parsed = new Date(trimmed)
+          if (!Number.isNaN(parsed.getTime())) {
+            return parsed.toISOString().slice(0, 10)
+          }
+        }
+        return null
+      }
+
+      const holdingsPayload = resolvedHoldings
+        .map((holding) => {
+          const tickerSource = holding.ticker ?? holding.rawTicker ?? ""
+          const ticker = typeof tickerSource === "string" ? tickerSource.trim().toUpperCase() : ""
+          if (!ticker) return null
+
+          const weightValue = clampNumber(normalizeWeight(holding.weight ?? 0), 4) ?? 0
+          const sharesValue = clampNumber(parseNumeric(holding.shares ?? null), 6)
+          const purchasePriceValue = clampNumber(parseNumeric(holding.purchasePrice ?? null), 2)
+
+          return {
+            ticker,
+            weight: weightValue,
+            shares: sharesValue ?? undefined,
+            purchasePrice: purchasePriceValue ?? undefined,
+          }
+        })
+        .filter((holding): holding is NonNullable<typeof holding> => holding !== null)
+
+      if (!holdingsPayload.length) {
+        throw new Error("No valid holdings to import after sanitization.")
+      }
 
       const response = await fetch(
         "/api/portfolios",
         withCsrfHeaders({
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: portfolioName.trim(),
-            description: portfolioDescription.trim() || undefined,
-            holdings: holdingsPayload,
+            body: JSON.stringify({
+              name: portfolioName.trim(),
+              description: portfolioDescription.trim() || undefined,
+              holdings: holdingsPayload,
+            }),
           }),
-        }),
       )
 
       const payload = await response.json()
@@ -1051,7 +1144,11 @@ export function PortfolioUploadForm({
 
       setCreatedPortfolio({ id: payload.portfolioId, name: portfolioName.trim() })
       updateStep("complete")
+      insertedPortfolioId = null
     } catch (error) {
+      if (insertedPortfolioId) {
+        await supabase.from("portfolios").delete().eq("id", insertedPortfolioId)
+      }
       setErrorMessage(error instanceof Error ? error.message : "Failed to import portfolio.")
       updateStep("review")
     } finally {
