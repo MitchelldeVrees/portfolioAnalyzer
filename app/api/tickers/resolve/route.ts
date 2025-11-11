@@ -173,12 +173,27 @@ async function resolveHolding(
       ? holding.rowNumber
       : index + 1
 
-  const primaryTicker =
+  const rawTicker =
     typeof holding?.rawTicker === "string" && holding.rawTicker.trim()
       ? holding.rawTicker.trim()
-      : typeof holding?.ticker === "string"
-      ? holding.ticker.trim()
       : ""
+
+  const providedTicker =
+    typeof holding?.ticker === "string" && holding.ticker.trim() ? holding.ticker.trim() : ""
+
+  const displayTicker = rawTicker || providedTicker
+
+  const candidateInfo = buildTickerCandidateList(displayTicker)
+  const providedCandidateInfo =
+    providedTicker && providedTicker !== displayTicker
+      ? buildTickerCandidateList(providedTicker)
+      : null
+
+  const primaryTicker =
+    (providedCandidateInfo?.primary && providedCandidateInfo.primary.trim()) ||
+    (candidateInfo.primary && candidateInfo.primary.trim()) ||
+    providedTicker ||
+    displayTicker
 
   const attempted: string[] = []
 
@@ -186,13 +201,12 @@ async function resolveHolding(
     return {
       issue: {
         rowNumber,
-        rawTicker: "",
+        rawTicker: displayTicker,
         reason: "Missing ticker value",
       },
     }
   }
 
-  const candidateInfo = buildTickerCandidateList(primaryTicker)
   const candidateMap = new Map<string, "provided" | "candidate">()
 
   const addCandidate = (value: string | null | undefined, source: "provided" | "candidate") => {
@@ -203,8 +217,10 @@ async function resolveHolding(
     }
   }
 
+  addCandidate(primaryTicker, "provided")
   addCandidate(holding?.ticker, "provided")
   candidateInfo.candidates.forEach((candidate) => addCandidate(candidate, "candidate"))
+  providedCandidateInfo?.candidates.forEach((candidate) => addCandidate(candidate, "candidate"))
   if (Array.isArray(holding?.candidates)) {
     holding?.candidates?.forEach((candidate) => addCandidate(candidate, "candidate"))
   }
@@ -239,10 +255,10 @@ async function resolveHolding(
     if (!attempted.includes(normalized)) attempted.push(normalized)
     const quote = await validateSymbol(normalized)
     if (!quote.ok) return null
-    if (!isQuoteTypeAllowed(quote.quoteType, primaryTicker)) return null
+    if (!isQuoteTypeAllowed(quote.quoteType, displayTicker || primaryTicker)) return null
     return {
       rowNumber,
-      rawTicker: primaryTicker,
+      rawTicker: displayTicker || primaryTicker,
       resolvedTicker: quote.symbol ?? normalized,
       source,
       confidence,
@@ -306,7 +322,7 @@ async function resolveHolding(
       if (fallbackSymbol) {
         return {
           rowNumber,
-          rawTicker: primaryTicker,
+          rawTicker: displayTicker || primaryTicker,
           resolvedTicker: fallbackSymbol,
           source: opts.source,
           confidence: opts.confidence * 0.75,
@@ -351,6 +367,9 @@ async function resolveHolding(
     searchQueries.add(identifiers.name)
   }
   searchQueries.add(primaryTicker)
+  if (displayTicker && displayTicker !== primaryTicker) {
+    searchQueries.add(displayTicker)
+  }
   candidateMap.forEach((_source, symbol) => searchQueries.add(symbol))
 
   let searchAttempts = 0
@@ -376,7 +395,7 @@ async function resolveHolding(
   return {
     issue: {
       rowNumber,
-      rawTicker: primaryTicker,
+      rawTicker: displayTicker || primaryTicker,
       reason: "Unable to find matching ticker",
       attempted: attempted.length ? [...attempted] : undefined,
     },

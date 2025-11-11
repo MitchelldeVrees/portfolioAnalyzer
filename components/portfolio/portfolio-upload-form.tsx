@@ -915,6 +915,8 @@ export function PortfolioUploadForm({
     setErrorMessage(null)
     setResolutionSummary(null)
 
+    let insertedPortfolioId: string | null = null
+
     try {
       const {
         data: { user },
@@ -956,23 +958,23 @@ export function PortfolioUploadForm({
         resolutionByRow.set(record.rowNumber, record)
       })
 
-      setParsedData((previous) =>
-        previous.map((holding) => {
-          const resolution = resolutionByRow.get(holding.rowNumber)
-          if (!resolution) return holding
-          return {
-            ...holding,
-            ticker: resolution.resolvedTicker,
-            resolution: {
-              resolvedTicker: resolution.resolvedTicker,
-              source: resolution.source,
-              confidence: resolution.confidence,
-              usedIdentifier: resolution.usedIdentifier,
-              note: resolution.note,
-            },
-          }
-        }),
-      )
+      const resolvedHoldings = parsedData.map((holding) => {
+        const resolution = resolutionByRow.get(holding.rowNumber)
+        if (!resolution) return holding
+        return {
+          ...holding,
+          ticker: resolution.resolvedTicker,
+          resolution: {
+            resolvedTicker: resolution.resolvedTicker,
+            source: resolution.source,
+            confidence: resolution.confidence,
+            usedIdentifier: resolution.usedIdentifier,
+            note: resolution.note,
+          },
+        }
+      })
+
+      setParsedData(resolvedHoldings)
 
       if (unresolvedRecords.length > 0) {
         const unresolvedSummary = unresolvedRecords
@@ -1022,41 +1024,144 @@ export function PortfolioUploadForm({
 
       if (portfolioError) throw portfolioError
       if (!portfolio) throw new Error("Portfolio creation returned no data.")
+      insertedPortfolioId = portfolio.id
 
-      const holdingsToInsert = parsedData.map((holding) => ({
-        portfolio_id: portfolio.id,
-        ticker: holding.ticker,
-        weight: holding.weight ?? 0,
-        shares: holding.shares ?? null,
-        purchase_price: holding.purchasePrice ?? null,
-        security_name: holding.securityName ?? null,
-        isin: holding.isin ?? null,
-        cusip: holding.cusip ?? null,
-        sedol: holding.sedol ?? null,
-        market_value: holding.marketValue ?? null,
-        cost_value: holding.costValue ?? null,
-        unrealized_pl: holding.unrealizedPl ?? null,
-        realized_pl: holding.realizedPl ?? null,
-        total_pl: holding.totalPl ?? null,
-        sector: holding.sector ?? null,
-        country: holding.country ?? null,
-        asset_type: holding.assetType ?? null,
-        coupon: holding.coupon ?? null,
-        maturity_date: holding.maturityDate ?? null,
-        yield_to_maturity: holding.yieldToMaturity ?? null,
-        trade_date: holding.tradeDate ?? null,
-        settlement_date: holding.settlementDate ?? null,
-        market_price: holding.marketPrice ?? null,
-        account_id: holding.accountId ?? null,
-        portfolio_name: holding.portfolioName ?? null,
-      }))
+      const clampNumber = (value: number | null, scale: number): number | null => {
+        if (value === null) return null
+        if (!Number.isFinite(value)) return null
+        return Number.parseFloat(value.toFixed(scale))
+      }
+
+      const parseNumeric = (value: unknown): number | null => {
+        if (typeof value === "number") {
+          return Number.isFinite(value) ? value : null
+        }
+        if (typeof value === "string") {
+          const trimmed = value.trim()
+          if (!trimmed) return null
+          const normalised = trimmed.replace(/[^0-9.\-]/g, "")
+          const parsed = Number.parseFloat(normalised)
+          return Number.isFinite(parsed) ? parsed : null
+        }
+        return null
+      }
+
+      const normalizeWeight = (value: unknown): number => {
+        const numeric = parseNumeric(value)
+        if (numeric === null || numeric < 0) return 0
+        if (numeric > 1 && numeric <= 100) return numeric / 100
+        if (numeric > 1) return 1
+        return numeric
+      }
+
+      const normalizeDateValue = (value: unknown): string | null => {
+        if (!value) return null
+        if (value instanceof Date && !Number.isNaN(value.getTime())) {
+          return value.toISOString().slice(0, 10)
+        }
+        if (typeof value === "string") {
+          const trimmed = value.trim()
+          if (!trimmed) return null
+
+          const isoMatch = trimmed.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/)
+          if (isoMatch) {
+            const [, year, month, day] = isoMatch
+            const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)))
+            if (!Number.isNaN(date.getTime())) {
+              return date.toISOString().slice(0, 10)
+            }
+          }
+
+          const shortIsoMatch = trimmed.match(/^(\d{8})$/)
+          if (shortIsoMatch) {
+            const digits = shortIsoMatch[1]
+            const year = Number(digits.slice(0, 4))
+            const month = Number(digits.slice(4, 6))
+            const day = Number(digits.slice(6, 8))
+            const date = new Date(Date.UTC(year, month - 1, day))
+            if (!Number.isNaN(date.getTime())) {
+              return date.toISOString().slice(0, 10)
+            }
+          }
+
+          const euroMatch = trimmed.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})$/)
+          if (euroMatch) {
+            const [, day, month, yearDigits] = euroMatch
+            const year = yearDigits.length === 2 ? Number(`20${yearDigits}`) : Number(yearDigits)
+            const date = new Date(Date.UTC(year, Number(month) - 1, Number(day)))
+            if (!Number.isNaN(date.getTime())) {
+              return date.toISOString().slice(0, 10)
+            }
+          }
+
+          const parsed = new Date(trimmed)
+          if (!Number.isNaN(parsed.getTime())) {
+            return parsed.toISOString().slice(0, 10)
+          }
+        }
+        return null
+      }
+
+      const cleanString = (value: unknown): string | null => {
+        if (typeof value !== "string") return null
+        const trimmed = value.trim()
+        return trimmed ? trimmed : null
+      }
+
+      const holdingsToInsert = resolvedHoldings
+        .map((holding) => {
+          const tickerSource = holding.ticker ?? holding.rawTicker ?? ""
+          const ticker = typeof tickerSource === "string" ? tickerSource.trim().toUpperCase() : ""
+          if (!ticker) return null
+
+          const weightValue = clampNumber(normalizeWeight(holding.weight ?? 0), 4) ?? 0
+          const sharesValue = clampNumber(parseNumeric(holding.shares ?? null), 6)
+          const purchasePriceValue = clampNumber(parseNumeric(holding.purchasePrice ?? null), 2)
+
+          return {
+            portfolio_id: portfolio.id,
+            ticker,
+            weight: weightValue,
+            shares: sharesValue,
+            purchase_price: purchasePriceValue,
+            security_name: cleanString(holding.securityName),
+            isin: cleanString(holding.isin),
+            cusip: cleanString(holding.cusip),
+            sedol: cleanString(holding.sedol),
+            market_value: clampNumber(parseNumeric(holding.marketValue ?? null), 2),
+            cost_value: clampNumber(parseNumeric(holding.costValue ?? null), 2),
+            unrealized_pl: clampNumber(parseNumeric(holding.unrealizedPl ?? null), 2),
+            realized_pl: clampNumber(parseNumeric(holding.realizedPl ?? null), 2),
+            total_pl: clampNumber(parseNumeric(holding.totalPl ?? null), 2),
+            sector: cleanString(holding.sector),
+            country: cleanString(holding.country),
+            asset_type: cleanString(holding.assetType),
+            coupon: clampNumber(parseNumeric(holding.coupon ?? null), 4),
+            maturity_date: normalizeDateValue(holding.maturityDate),
+            yield_to_maturity: clampNumber(parseNumeric(holding.yieldToMaturity ?? null), 4),
+            trade_date: normalizeDateValue(holding.tradeDate),
+            settlement_date: normalizeDateValue(holding.settlementDate),
+            market_price: clampNumber(parseNumeric(holding.marketPrice ?? null), 2),
+            account_id: cleanString(holding.accountId),
+            portfolio_name: cleanString(holding.portfolioName),
+          }
+        })
+        .filter((holding): holding is NonNullable<typeof holding> => holding !== null)
+
+      if (!holdingsToInsert.length) {
+        throw new Error("No valid holdings to import after sanitization.")
+      }
 
       const { error: holdingsError } = await supabase.from("portfolio_holdings").insert(holdingsToInsert)
       if (holdingsError) throw holdingsError
 
       setCreatedPortfolio({ id: portfolio.id, name: portfolio.name ?? portfolioName.trim() })
       updateStep("complete")
+      insertedPortfolioId = null
     } catch (error) {
+      if (insertedPortfolioId) {
+        await supabase.from("portfolios").delete().eq("id", insertedPortfolioId)
+      }
       setErrorMessage(error instanceof Error ? error.message : "Failed to import portfolio.")
       updateStep("review")
     } finally {
