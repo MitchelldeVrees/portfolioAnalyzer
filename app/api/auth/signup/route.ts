@@ -12,7 +12,7 @@ import {
   SessionAssuranceLevel,
   getSessionRole,
 } from "@/lib/security/session"
-import { MFA_ENABLED } from "@/lib/security/mfa-config"
+import { isMfaEnabledForRole } from "@/lib/security/mfa-config"
 
 type CookieMutation = {
   name: string
@@ -82,7 +82,7 @@ export async function POST(request: NextRequest) {
 
   const nowSeconds = Math.floor(Date.now() / 1000)
   const role = getSessionRole(user)
-  const requiresMfa = MFA_ENABLED && role === "admin"
+  const requiresMfa = isMfaEnabledForRole(role)
   const requiresFirstLoginSetup = Boolean(data.session)
   const assuranceLevel: SessionAssuranceLevel = requiresMfa ? "aal1" : "aal2"
   const mfaFlag = requiresMfa ? "1" : "0"

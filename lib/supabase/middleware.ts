@@ -13,7 +13,7 @@ import {
   SESSION_ROLE_COOKIE_NAME,
   getSessionRole,
 } from "@/lib/security/session"
-import { MFA_ENABLED } from "@/lib/security/mfa-config"
+import { isMfaEnabledForRole } from "@/lib/security/mfa-config"
 import { CSRF_COOKIE_NAME, CSRF_COOKIE_OPTIONS, CSRF_HEADER_NAME, generateCsrfToken } from "@/lib/security/csrf"
 
 type CookieMutation = {
@@ -158,6 +158,7 @@ export async function updateSession(request: NextRequest) {
     }
 
     const currentRole = getSessionRole(user)
+    const mfaAllowed = isMfaEnabledForRole(currentRole)
     const metadata = user.app_metadata ?? {}
     const mfaState = (metadata as any).mfa ?? {}
     const hasTotp = Boolean(mfaState?.totp?.secret)
@@ -165,8 +166,8 @@ export async function updateSession(request: NextRequest) {
     const hasWebAuthn = Array.isArray(credentials) && credentials.length > 0
     const securityMetadata = (metadata as any).security as { firstLoginComplete?: boolean } | undefined
     const baseFirstLoginComplete = Boolean(securityMetadata?.firstLoginComplete) || hasTotp || hasWebAuthn
-    const firstLoginComplete = MFA_ENABLED ? baseFirstLoginComplete : true
-    const requiresFirstLoginSetup = MFA_ENABLED && !firstLoginComplete && !hasTotp && !hasWebAuthn
+    const firstLoginComplete = mfaAllowed ? baseFirstLoginComplete : true
+    const requiresFirstLoginSetup = mfaAllowed && !firstLoginComplete && !hasTotp && !hasWebAuthn
     const isMfaSetupPath = request.nextUrl.pathname.startsWith("/auth/mfa/setup")
     const isMfaApi = request.nextUrl.pathname.startsWith("/api/auth/mfa")
     const isAuthApi = request.nextUrl.pathname.startsWith("/api/auth")
@@ -189,8 +190,8 @@ export async function updateSession(request: NextRequest) {
     }
 
     const issuedTimestamp = sessionRotated || !issuedAt ? nowSeconds : issuedAt ?? nowSeconds
-    const nextAal = MFA_ENABLED ? (storedAal === "aal2" ? "aal2" : "aal1") : "aal2"
-    const nextMfaRequired = MFA_ENABLED && storedMfaRequired === "1" ? "1" : "0"
+    const nextAal = mfaAllowed ? (storedAal === "aal2" ? "aal2" : "aal1") : "aal2"
+    const nextMfaRequired = mfaAllowed && storedMfaRequired === "1" ? "1" : "0"
 
     if (requiresFirstLoginSetup && !isMfaSetupPath && !isMfaApi && !isAuthApi) {
       const url = request.nextUrl.clone()
@@ -204,7 +205,7 @@ export async function updateSession(request: NextRequest) {
       return setCsrfCookie(applyCookieMutations(redirect, cookieMutations))
     }
 
-    const requiresMfa = MFA_ENABLED && (nextMfaRequired === "1" || currentRole === "admin")
+    const requiresMfa = mfaAllowed && (nextMfaRequired === "1" || currentRole === "admin")
     const isMfaPath = request.nextUrl.pathname.startsWith("/auth/mfa")
     const isCurrentPathMfaApi = request.nextUrl.pathname.startsWith("/api/auth/mfa")
 
