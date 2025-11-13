@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchQuotesBatch, fetchHistoryMonthlyClose } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
-import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
+import { ensureSectors, sectorForTicker, seedSectorFromQuote } from "@/lib/sector-classifier";
 
 // --- types ---
 type Holding = {
@@ -592,6 +592,20 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
 
   const symbols = holdings.map((h) => h.ticker);
   const quotesMap = await fetchQuotesBatch(symbols);
+
+  for (const [symbol, quote] of Object.entries(quotesMap)) {
+    if (!quote) continue;
+    if (quote.sector || quote.industry || quote.quoteType || quote.longName || quote.shortName) {
+      seedSectorFromQuote(symbol, {
+        sector: quote.sector,
+        industry: quote.industry,
+        quoteType: quote.quoteType,
+        longName: quote.longName,
+        shortName: quote.shortName,
+      });
+    }
+  }
+
   try {
     await ensureSectors(symbols);
   } catch (error) {

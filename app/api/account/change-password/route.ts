@@ -22,6 +22,15 @@ function applyCookieMutations(response: NextResponse, mutations: CookieMutation[
   return response
 }
 
+function isStrongPassword(password: string) {
+  if (password.length < 12) return false
+  if (!/[A-Z]/.test(password)) return false
+  if (!/[a-z]/.test(password)) return false
+  if (!/\d/.test(password)) return false
+  if (!/[^A-Za-z0-9]/.test(password)) return false
+  return true
+}
+
 export async function POST(request: NextRequest) {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -54,8 +63,13 @@ export async function POST(request: NextRequest) {
   const payload = await request.json().catch(() => null)
   const newPassword = payload?.newPassword?.toString() ?? ""
 
-  if (newPassword.length < 8) {
-    return NextResponse.json({ error: "Password must be at least 8 characters long" }, { status: 400 })
+  if (!isStrongPassword(newPassword)) {
+    return NextResponse.json(
+      {
+        error: "Password must be at least 12 characters and include uppercase, lowercase, number, and symbol.",
+      },
+      { status: 400 },
+    )
   }
 
   const { error: updateError } = await supabase.auth.updateUser({ password: newPassword })

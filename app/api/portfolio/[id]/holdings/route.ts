@@ -3,7 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchQuotesBatch, fetchHistoryMonthlyClose } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
-import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
+import { ensureSectors, sectorForTicker, seedSectorFromQuote } from "@/lib/sector-classifier";
 
 type Holding = {
   id: string;
@@ -389,12 +389,26 @@ async function computeHoldingsSnapshot(
   }
 
   const symbols = sanitized.map((h) => h.ticker);
+  const quotesMap = (await fetchQuotesBatch(symbols)) || {};
+
+  for (const [symbol, quote] of Object.entries(quotesMap)) {
+    if (!quote) continue;
+    if (quote.sector || quote.industry || quote.quoteType || quote.longName || quote.shortName) {
+      seedSectorFromQuote(symbol, {
+        sector: quote.sector,
+        industry: quote.industry,
+        quoteType: quote.quoteType,
+        longName: quote.longName,
+        shortName: quote.shortName,
+      });
+    }
+  }
+
   try {
     await ensureSectors(symbols);
   } catch (error) {
     console.warn("[holdings] sector preload failed", (error as Error)?.message ?? error);
   }
-  const quotesMap = (await fetchQuotesBatch(symbols)) || {};
 
   const temp = sanitized.map((h) => {
     const quote = quotesMap[h.ticker] || { price: 100 };

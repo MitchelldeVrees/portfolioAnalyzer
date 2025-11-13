@@ -20,6 +20,11 @@ export type Quote = {
   pe?: number
   dividend?: number
   beta?: number
+  sector?: string
+  industry?: string
+  quoteType?: string
+  longName?: string
+  shortName?: string
 }
 
 export type OHLCPoint = { date: string; close: number }
@@ -229,6 +234,11 @@ async function yahooQuotesBatch(symbols: string[]): Promise<Record<string, Quote
       const price = asNumber(r.regularMarketPrice)
       const change = asNumber(r.regularMarketChange, 0)
       const changePercent = asNumber(r.regularMarketChangePercent, 0)
+      const sector = typeof r?.sector === "string" ? r.sector : undefined
+      const industry = typeof r?.industry === "string" ? r.industry : undefined
+      const quoteType = typeof r?.quoteType === "string" ? r.quoteType : undefined
+      const longName = typeof r?.longName === "string" ? r.longName : undefined
+      const shortName = typeof r?.shortName === "string" ? r.shortName : undefined
       if (Number.isFinite(price)) {
         out[sym] = {
           price,
@@ -238,6 +248,11 @@ async function yahooQuotesBatch(symbols: string[]): Promise<Record<string, Quote
           pe: asNumber(r.trailingPE),
           dividend: asNumber(r.trailingAnnualDividendRate),
           beta: asNumber(r.beta) || asNumber(r.beta3Year),
+          sector,
+          industry,
+          quoteType,
+          longName,
+          shortName,
         }
       }
     }

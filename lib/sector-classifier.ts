@@ -55,6 +55,14 @@ const BUILTIN_SECTORS: Record<string, string> = {
 const sectorCache = new Map<string, SectorEntry>()
 const inflightLookups = new Map<string, Promise<string>>()
 
+type SectorSeed = {
+  sector?: string | null
+  industry?: string | null
+  quoteType?: string | null
+  longName?: string | null
+  shortName?: string | null
+}
+
 export async function ensureSectors(tickers: string[]): Promise<void> {
   const unique = Array.from(new Set(tickers.map(normalizeTicker).filter(Boolean)))
   for (const ticker of unique) {
@@ -75,6 +83,28 @@ export function sectorForTicker(ticker: string): string {
   if (builtin) return builtin
 
   return "Other"
+}
+
+export function seedSectorFromQuote(ticker: string, seed: SectorSeed) {
+  const normalized = normalizeTicker(ticker)
+  if (!normalized) return
+
+  const existing = sectorCache.get(normalized)
+  if (existing && !isExpired(existing.ts) && existing.sector !== "Other") {
+    return
+  }
+
+  const determined = determineSector(normalized, {
+    rawSector: seed.sector ?? undefined,
+    rawIndustry: seed.industry ?? undefined,
+    quoteType: seed.quoteType ?? undefined,
+    longName: seed.longName ?? undefined,
+    shortName: seed.shortName ?? undefined,
+  })
+
+  if (determined && determined !== "Other") {
+    sectorCache.set(normalized, { sector: determined, ts: Date.now() })
+  }
 }
 
 function normalizeTicker(ticker: string | null | undefined): string {
