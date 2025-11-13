@@ -16,10 +16,6 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isRedirecting, setIsRedirecting] = useState(false)
-  const [showForgotForm, setShowForgotForm] = useState(false)
-  const [forgotEmail, setForgotEmail] = useState("")
-  const [isSendingReset, setIsSendingReset] = useState(false)
-  const [resetMessage, setResetMessage] = useState<string | null>(null)
   const router = useRouter()
 
   const handleLogin = async (e: FormEvent) => {
@@ -60,33 +56,6 @@ export default function LoginPage() {
       setError(error instanceof Error ? error.message : "Unable to sign in")
     } finally {
       setIsLoading(false)
-    }
-  }
-
-  const handlePasswordReset = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!forgotEmail) return
-    setIsSendingReset(true)
-    setResetMessage(null)
-
-    try {
-      const response = await fetch(
-        "/api/auth/forgot",
-        withCsrfHeaders({
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: forgotEmail }),
-        }),
-      )
-      const payload = await response.json()
-      if (!response.ok) {
-        throw new Error(payload?.error ?? "Unable to send reset email")
-      }
-      setResetMessage("Check your inbox for a password reset link.")
-    } catch (err) {
-      setResetMessage(err instanceof Error ? err.message : "Unable to send reset email")
-    } finally {
-      setIsSendingReset(false)
     }
   }
 
@@ -163,41 +132,6 @@ export default function LoginPage() {
                 Sign In
               </LoadingButton>
             </form>
-            <div className="text-center text-sm text-slate-600 dark:text-slate-400">
-              <button
-                type="button"
-                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
-                onClick={() => setShowForgotForm((prev) => !prev)}
-              >
-                Forgot your password?
-              </button>
-            </div>
-            {showForgotForm && (
-              <form onSubmit={handlePasswordReset} className="space-y-3 rounded-lg border border-dashed border-slate-200 p-4">
-                <Label htmlFor="forgot-email" className="text-slate-700 dark:text-slate-300">
-                  Enter your email to receive reset instructions
-                </Label>
-                <Input
-                  id="forgot-email"
-                  type="email"
-                  required
-                  value={forgotEmail}
-                  onChange={(e) => setForgotEmail(e.target.value)}
-                  className="border-slate-200 dark:border-slate-700"
-                />
-                <LoadingButton
-                  type="submit"
-                  className="w-full bg-slate-900 text-white"
-                  loading={isSendingReset}
-                  loadingText="Sending..."
-                >
-                  Send reset link
-                </LoadingButton>
-                {resetMessage && (
-                  <p className="text-sm text-center text-slate-500 dark:text-slate-400">{resetMessage}</p>
-                )}
-              </form>
-            )}
             <div className="text-center text-sm text-slate-600 dark:text-slate-400">
               {"Don't have an account? "}
               <Link
