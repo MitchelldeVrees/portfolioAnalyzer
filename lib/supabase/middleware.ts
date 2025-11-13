@@ -22,7 +22,15 @@ type CookieMutation = {
   options?: ResponseCookie
 }
 
-const PUBLIC_PATHS = ["/", "/auth/login", "/auth/signup", "/auth/verify-email", "/auth/mfa", "/auth/mfa/setup"]
+const PUBLIC_PATHS = [
+  "/",
+  "/auth/login",
+  "/auth/signup",
+  "/auth/verify-email",
+  "/auth/mfa",
+  "/auth/mfa/setup",
+  "/auth/reset-password",
+]
 
 function applyCookieMutations(response: NextResponse, mutations: CookieMutation[]) {
   for (const { name, value, options } of mutations) {
