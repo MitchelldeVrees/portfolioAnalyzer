@@ -6,14 +6,20 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { FormEvent, useState } from "react"
+import { FormEvent, useState, useEffect } from "react"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
+import { Spinner } from "@/components/ui/spinner"
 
 export default function LoginPage() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isRedirecting, setIsRedirecting] = useState(false)
+  const [showForgotForm, setShowForgotForm] = useState(false)
+  const [forgotEmail, setForgotEmail] = useState("")
+  const [isSendingReset, setIsSendingReset] = useState(false)
+  const [resetMessage, setResetMessage] = useState<string | null>(null)
   const router = useRouter()
 
   const handleLogin = async (e: FormEvent) => {
@@ -35,11 +41,19 @@ export default function LoginPage() {
         throw new Error(payload?.error ?? "Unable to sign in")
       }
 
+      const beginRedirect = () => {
+        setIsRedirecting(true)
+        setIsLoading(false)
+      }
+
       if (payload?.requiresFirstLoginSetup) {
+        beginRedirect()
         router.push("/auth/mfa/setup")
       } else if (payload?.requiresMfa) {
+        beginRedirect()
         router.push("/auth/mfa")
       } else {
+        beginRedirect()
         router.push("/dashboard")
       }
     } catch (error: unknown) {
@@ -49,10 +63,46 @@ export default function LoginPage() {
     }
   }
 
+  const handlePasswordReset = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!forgotEmail) return
+    setIsSendingReset(true)
+    setResetMessage(null)
+
+    try {
+      const response = await fetch(
+        "/api/auth/forgot",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: forgotEmail }),
+        }),
+      )
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to send reset email")
+      }
+      setResetMessage("Check your inbox for a password reset link.")
+    } catch (err) {
+      setResetMessage(err instanceof Error ? err.message : "Unable to send reset email")
+    } finally {
+      setIsSendingReset(false)
+    }
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 p-4">
       <div className="w-full max-w-md">
-        <Card className="shadow-xl border-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm">
+        <Card className="shadow-xl border-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm relative overflow-hidden">
+          {isRedirecting && (
+            <div className="absolute inset-0 bg-white/70 dark:bg-slate-900/70 backdrop-blur-sm flex flex-col items-center justify-center z-10 space-y-3 text-center">
+              <Spinner size="lg" className="text-blue-600 dark:text-blue-400" />
+              <div>
+                <p className="text-base font-medium text-slate-900 dark:text-slate-100">Preparing your dashboard</p>
+                <p className="text-sm text-slate-600 dark:text-slate-400">Hang tight while we finish signing you in.</p>
+              </div>
+            </div>
+          )}
           <CardHeader className="text-center pb-2">
             <div className="mx-auto w-12 h-12 bg-blue-600 rounded-xl flex items-center justify-center mb-4">
               <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -113,6 +163,41 @@ export default function LoginPage() {
                 Sign In
               </LoadingButton>
             </form>
+            <div className="text-center text-sm text-slate-600 dark:text-slate-400">
+              <button
+                type="button"
+                className="text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 font-medium"
+                onClick={() => setShowForgotForm((prev) => !prev)}
+              >
+                Forgot your password?
+              </button>
+            </div>
+            {showForgotForm && (
+              <form onSubmit={handlePasswordReset} className="space-y-3 rounded-lg border border-dashed border-slate-200 p-4">
+                <Label htmlFor="forgot-email" className="text-slate-700 dark:text-slate-300">
+                  Enter your email to receive reset instructions
+                </Label>
+                <Input
+                  id="forgot-email"
+                  type="email"
+                  required
+                  value={forgotEmail}
+                  onChange={(e) => setForgotEmail(e.target.value)}
+                  className="border-slate-200 dark:border-slate-700"
+                />
+                <LoadingButton
+                  type="submit"
+                  className="w-full bg-slate-900 text-white"
+                  loading={isSendingReset}
+                  loadingText="Sending..."
+                >
+                  Send reset link
+                </LoadingButton>
+                {resetMessage && (
+                  <p className="text-sm text-center text-slate-500 dark:text-slate-400">{resetMessage}</p>
+                )}
+              </form>
+            )}
             <div className="text-center text-sm text-slate-600 dark:text-slate-400">
               {"Don't have an account? "}
               <Link

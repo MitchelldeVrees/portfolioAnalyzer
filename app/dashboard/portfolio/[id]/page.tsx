@@ -2,6 +2,7 @@ import { redirect } from "next/navigation"
 import { createClient } from "@/lib/supabase/server"
 import { DashboardHeader } from "@/components/dashboard/dashboard-header"
 import { PortfolioAnalysis } from "@/components/portfolio/portfolio-analysis"
+import { getSnaptradeHoldingsDetails } from "@/lib/snaptrade/holdings"
 
 interface PageProps {
   params: Promise<{ id: string }>
@@ -17,6 +18,9 @@ export default async function PortfolioPage({ params }: PageProps) {
   if (error || !data?.user) {
     redirect("/auth/login")
   }
+
+  const snaptradeDetails = await getSnaptradeHoldingsDetails(supabase, data.user.id)
+  const snaptradeSummary = snaptradeDetails.status === "ok" ? snaptradeDetails.summary : null
 
   // Get portfolio with holdings
   const { data: portfolio, error: portfolioError } = await supabase
@@ -66,7 +70,7 @@ export default async function PortfolioPage({ params }: PageProps) {
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
-      <DashboardHeader user={data.user} />
+      <DashboardHeader user={data.user} snaptradeSummary={snaptradeSummary} />
       <main className="container mx-auto px-4 py-8">
         <div className="max-w-6xl mx-auto">
           <PortfolioAnalysis portfolio={portfolio} initialAnalysis={initialAnalysis} initialHoldings={initialHoldings} />

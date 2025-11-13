@@ -65,7 +65,7 @@ export async function POST(request: NextRequest) {
       cookieMutations,
     )
   } catch (error) {
-    console.error("[snaptrade] failed to create connection session", error)
+    console.error("failed to create connection session", error)
     const message = error instanceof Error ? error.message : "Unable to start connection"
     return applyCookieMutations(NextResponse.json({ error: message }, { status: 500 }), cookieMutations)
   }
