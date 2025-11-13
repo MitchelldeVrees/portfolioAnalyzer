@@ -2,7 +2,7 @@
 
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
+import { Suspense, useCallback, useMemo, useState } from "react"
 
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -10,60 +10,20 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { createClient as createBrowserSupabaseClient } from "@/lib/supabase/client"
 
-type RecoveryTokens = {
-  access_token: string | null
-  refresh_token: string | null
-  type: string | null
-}
-
-function parseTokensFromHash(hash: string): RecoveryTokens {
-  if (!hash || hash[0] !== "#") return { access_token: null, refresh_token: null, type: null }
-  const params = new URLSearchParams(hash.slice(1))
-  return {
-    access_token: params.get("access_token"),
-    refresh_token: params.get("refresh_token"),
-    type: params.get("type"),
-  }
-}
-
 function ResetPasswordContent() {
-  const router = useRouter()
   const searchParams = useSearchParams()
-  const [newPassword, setNewPassword] = useState("")
-  const [confirmPassword, setConfirmPassword] = useState("")
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
-  const [isError, setIsError] = useState(false)
-  const [tokens, setTokens] = useState<RecoveryTokens>({ access_token: null, refresh_token: null, type: null })
-  const [sessionReady, setSessionReady] = useState(false)
-
+  const router = useRouter()
   const supabase = useMemo(() => createBrowserSupabaseClient(), [])
 
-  useEffect(() => {
-    const fromQuery: RecoveryTokens = {
-      access_token: searchParams.get("access_token"),
-      refresh_token: searchParams.get("refresh_token"),
-      type: searchParams.get("type"),
-    }
-    if (fromQuery.access_token && fromQuery.refresh_token) {
-      setTokens(fromQuery)
-      return
-    }
-    const parsedHash = parseTokensFromHash(window.location.hash)
-    setTokens(parsedHash)
-  }, [searchParams])
+  const [newPassword, setNewPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [message, setMessage] = useState<string | null>(null)
+  const [isError, setIsError] = useState(false)
+  const [isSessionReady, setIsSessionReady] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  useEffect(() => {
-    if (!tokens.access_token || !tokens.refresh_token) return
-    void supabase.auth.setSession({ access_token: tokens.access_token, refresh_token: tokens.refresh_token }).then((res) => {
-      if (res.error) {
-        setIsError(true)
-        setMessage(res.error.message)
-        return
-      }
-      setSessionReady(true)
-    })
-  }, [supabase, tokens])
+  const code = searchParams.get("code")
+  const type = searchParams.get("type")
 
   const passwordRequirements = useMemo(
     () => [
@@ -75,19 +35,36 @@ function ResetPasswordContent() {
     ],
     [newPassword],
   )
-
   const passwordsMatch = confirmPassword === newPassword && confirmPassword.length > 0
+
+  const handleExchange = useCallback(async () => {
+    if (!code || type !== "recovery") {
+      setIsError(true)
+      setMessage("Invalid or expired reset link. Request a new one from the login screen.")
+      return
+    }
+
+    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    if (error) {
+      setIsError(true)
+      setMessage(error.message || "Unable to initialize reset session.")
+      return
+    }
+
+    setIsError(false)
+    setMessage("Session ready. Enter a new password below.")
+    setIsSessionReady(true)
+  }, [code, type, supabase])
 
   const handleSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault()
 
-      if (!tokens.access_token || tokens.type !== "recovery") {
+      if (!isSessionReady) {
         setIsError(true)
-        setMessage("Invalid reset link.")
+        setMessage("Please follow the recovery link from your email first.")
         return
       }
-
       if (!passwordRequirements.every((req) => req.valid)) {
         setIsError(true)
         setMessage("Please meet all password requirements.")
@@ -98,11 +75,6 @@ function ResetPasswordContent() {
         setMessage("Passwords must match.")
         return
       }
-      if (!sessionReady) {
-        setIsError(true)
-        setMessage("Please wait while we prepare your session.")
-        return
-      }
 
       setIsSubmitting(true)
       const { error } = await supabase.auth.updateUser({ password: newPassword })
@@ -110,26 +82,26 @@ function ResetPasswordContent() {
 
       if (error) {
         setIsError(true)
-        setMessage(error.message)
+        setMessage(error.message || "Unable to update password.")
         return
       }
 
       await supabase.auth.signOut()
       setIsError(false)
-      setMessage("Your password was updated. Redirecting to login…")
+      setMessage("Password updated. Redirecting to sign in…")
       setTimeout(() => router.replace("/auth/login"), 1500)
     },
-    [tokens, passwordRequirements, passwordsMatch, sessionReady, supabase, newPassword, router],
+    [isSessionReady, passwordRequirements, passwordsMatch, newPassword, supabase, router],
   )
 
-  if (!tokens.access_token || tokens.type !== "recovery") {
+  if (!code || type !== "recovery") {
     return (
       <div className="min-h-screen grid place-items-center bg-slate-50 dark:bg-slate-900 px-4">
         <Card className="w-full max-w-md">
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-4 py-6 text-center">
             <CardTitle className="text-lg font-semibold">Reset unavailable</CardTitle>
             <CardDescription className="text-sm text-slate-600 dark:text-slate-400">
-              The link is missing or invalid. Please request a new reset from the login page.
+              This link is missing a recovery code. Please request a new password reset from the login page.
             </CardDescription>
             <Link href="/auth/login" className="text-blue-600 hover:underline">
               Back to sign in
@@ -145,53 +117,61 @@ function ResetPasswordContent() {
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <CardTitle>Reset password</CardTitle>
-          <CardDescription>Set a new password for your Portify account.</CardDescription>
+          <CardDescription>Follow the steps to change your password.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <form className="space-y-4" onSubmit={handleSubmit}>
-            <div className="space-y-2">
-              <Label htmlFor="reset-password">New password</Label>
-              <Input
-                id="reset-password"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="reset-confirm">Confirm password</Label>
-              <Input
-                id="reset-confirm"
-                type="password"
-                autoComplete="new-password"
-                required
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-              />
-            </div>
-            <div className="space-y-1 text-sm">
-              {passwordRequirements.map((requirement) => (
-                <p
-                  key={requirement.key}
-                  className={requirement.valid ? "text-emerald-600" : "text-slate-500 dark:text-slate-400"}
-                >
-                  {requirement.label}
-                </p>
-              ))}
-              <p className={passwordsMatch ? "text-emerald-600" : "text-slate-500 dark:text-slate-400"}>
-                {passwordsMatch ? "Passwords match" : "Passwords must match"}
+          {!isSessionReady ? (
+            <div className="space-y-3">
+              <p className="text-sm text-slate-600 dark:text-slate-400">
+                Click the button below to verify this recovery link and continue.
               </p>
+              <LoadingButton onClick={handleExchange} className="w-full">
+                Verify link
+              </LoadingButton>
             </div>
-            <LoadingButton type="submit" loading={isSubmitting} loadingText="Updating..." className="w-full">
-              Reset password
-            </LoadingButton>
-          </form>
+          ) : (
+            <form className="space-y-4" onSubmit={handleSubmit}>
+              <div className="space-y-2">
+                <Label htmlFor="reset-password">New password</Label>
+                <Input
+                  id="reset-password"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="reset-confirm">Confirm password</Label>
+                <Input
+                  id="reset-confirm"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                />
+              </div>
+              <div className="space-y-1 text-sm">
+                {passwordRequirements.map((requirement) => (
+                  <p
+                    key={requirement.key}
+                    className={requirement.valid ? "text-emerald-600" : "text-slate-500 dark:text-slate-400"}
+                  >
+                    {requirement.label}
+                  </p>
+                ))}
+                <p className={passwordsMatch ? "text-emerald-600" : "text-slate-500 dark:text-slate-400"}>
+                  {passwordsMatch ? "Passwords match" : "Passwords must match"}
+                </p>
+              </div>
+              <LoadingButton type="submit" loading={isSubmitting} loadingText="Updating..." className="w-full">
+                Reset password
+              </LoadingButton>
+            </form>
+          )}
           {message && <p className={`text-sm ${isError ? "text-red-600" : "text-emerald-600"}`}>{message}</p>}
-          <p className="text-xs text-slate-500">
-            Once the password is reset you will be redirected back to the login screen automatically.
-          </p>
         </CardContent>
       </Card>
     </div>
