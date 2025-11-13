@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server"
 
 import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supabase-route"
 import type { CookieMutation } from "@/lib/api/supabase-route"
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type Payload = {
   email?: string | null

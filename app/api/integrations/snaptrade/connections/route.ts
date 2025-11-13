@@ -4,6 +4,8 @@ import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supa
 import { assertSnaptradeConfigured, getSnaptradeClient } from "@/lib/snaptrade/client"
 import { ensureSnaptradeCredentials } from "@/lib/snaptrade/server"
 import type { CookieMutation } from "@/lib/api/supabase-route"
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(request: NextRequest) {
   let cookieMutations: CookieMutation[] = []
