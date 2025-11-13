@@ -44,7 +44,7 @@ function ResetPasswordContent() {
       return
     }
 
-    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    const { error } = await supabase.auth.exchangeCodeForSession({ code })
     if (error) {
       setIsError(true)
       setMessage(error.message || "Unable to initialize reset session.")
