@@ -23,7 +23,7 @@ function ResetPasswordContent() {
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const code = searchParams.get("code")
-  const type = searchParams.get("type")
+  const type = searchParams.get("type") ?? "recovery"
 
   const passwordRequirements = useMemo(
     () => [
