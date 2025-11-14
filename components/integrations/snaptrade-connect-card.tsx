@@ -35,6 +35,12 @@ type SnaptradeAccountHolding = {
     name?: string | null
     number?: string | null
     type?: string | null
+    balance?: {
+      total?: {
+        amount?: number | null
+        currency?: string | null
+      }
+    }
   }
   positions?: SnaptradePosition[] | null
   balances?: Array<{
@@ -239,12 +245,6 @@ export function SnaptradeConnectCard() {
     <Card className="border-slate-200 shadow-sm">
       <CardHeader className="flex flex-col gap-2">
         <CardTitle>Connect your broker</CardTitle>
-        {formattedSnaptradeBalance && (
-          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-700 dark:border-slate-700 dark:bg-slate-900/40">
-            <p className="text-xs uppercase tracking-wide text-slate-500">SnapTrade portfolio value</p>
-            <p className="text-lg font-semibold text-slate-900 dark:text-white">{formattedSnaptradeBalance}</p>
-          </div>
-        )}
       </CardHeader>
       <CardContent className="space-y-6">
         {error && (
@@ -420,11 +420,27 @@ export function SnaptradeConnectCard() {
             {holdings.map((account, idx) => {
               const name =
                 account.account?.name || account.account?.number || `Linked account ${idx + 1}`
+                console.log('account', account);
               const positions = Array.isArray(account.positions) ? account.positions.slice(0, 5) : []
+              const totalValue = account.total_value.value ?? null
+              const totalCurrency = account.total_value.currency ?? snaptradeSummary?.currency ?? "USD"
+              const formattedValue =
+                typeof totalValue === "number"
+                  ? new Intl.NumberFormat("en-US", { style: "currency", currency: totalCurrency ?? "USD" }).format(
+                      totalValue,
+                    )
+                  : null
               return (
                 <div key={`${account.account?.id ?? idx}`} className="rounded-lg border border-slate-200 p-4 space-y-3">
                   <div className="flex flex-col gap-1">
-                    <p className="font-medium text-slate-900">{name}</p>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-medium text-slate-900">{name}</p>
+                      {formattedValue && (
+                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {formattedValue}
+                        </span>
+                      )}
+                    </div>
                     {account.account?.type && (
                       <p className="text-xs uppercase tracking-wide text-slate-500">{account.account.type}</p>
                     )}

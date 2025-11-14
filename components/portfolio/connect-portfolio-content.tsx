@@ -213,8 +213,6 @@ export function ConnectPortfolioContent() {
                     rows={3}
                   />
                 </div>
-
-                
               </CardContent>
             </Card>
 

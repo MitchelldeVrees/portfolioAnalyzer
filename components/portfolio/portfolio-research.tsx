@@ -59,11 +59,6 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
           <CardTitle>AI Research</CardTitle>
           <CardDescription>Experimental research insights will appear here once this feature returns.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="h-32 rounded-lg bg-slate-100 dark:bg-slate-800 animate-pulse" />
-          <div className="h-20 rounded-lg bg-slate-100 dark:bg-slate-800 animate-pulse" />
-          <div className="h-20 rounded-lg bg-slate-100 dark:bg-slate-800 animate-pulse" />
-        </CardContent>
       </Card>
     )
   }

@@ -43,6 +43,7 @@ import {
   Upload,
 } from "lucide-react"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
+import { createClient as createSupabaseClient } from "@/lib/supabase/client"
 
 export type UploadStep = "upload" | "validate" | "review" | "import" | "complete"
 
@@ -99,7 +100,6 @@ export type ReviewCardProps = {
   errorMessage?: string | null
   canImport: boolean
   isImporting: boolean
-  onReset: () => void
   onDownloadIssues: () => void
   onImport: () => void
   currentStep: UploadStep
@@ -189,7 +189,6 @@ export function DefaultReviewCardContent({
   canImport,
   isImporting,
   errorMessage,
-  onReset,
   onDownloadIssues,
   onImport,
   columns,
@@ -410,16 +409,7 @@ export function DefaultReviewCardContent({
         </Alert>
       )}
 
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-4">
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={onReset}>
-            <RefreshCcw className="mr-2 h-4 w-4" />
-            Change file
-          </Button>
-         
-          
-        </div>
-
+      <div className="flex flex-wrap items-center justify-end gap-3 pt-4">
         <LoadingButton
           type="button"
           onClick={onImport}
@@ -444,6 +434,7 @@ export function PortfolioUploadForm({
   onReviewContentChange,
 }: PortfolioUploadFormProps) {
   const router = useRouter()
+  const supabase = useMemo(() => createSupabaseClient(), [])
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -1154,7 +1145,7 @@ export function PortfolioUploadForm({
     } finally {
       setIsImporting(false)
     }
-  }, [canImport, errorCount, parsedData, portfolioDescription, portfolioName, router, updateStep])
+  }, [canImport, errorCount, parsedData, portfolioDescription, portfolioName, router, supabase, updateStep])
 
   const reviewCardData = useMemo<ReviewCardProps | null>(() => {
     if (currentStep === "upload" || parsedData.length === 0) return null
@@ -1166,7 +1157,6 @@ export function PortfolioUploadForm({
       errorMessage,
       canImport,
       isImporting,
-      onReset: resetFlow,
       onDownloadIssues: handleDownloadIssues,
       onImport: handleSubmit,
       currentStep,
