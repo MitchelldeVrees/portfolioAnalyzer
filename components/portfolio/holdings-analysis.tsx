@@ -11,6 +11,26 @@ import { TrendingUp, TrendingDown, Minus, Info } from "lucide-react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { LoadingButton } from "@/components/ui/loading-button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { withCsrfHeaders } from "@/lib/security/csrf-client"
+
+const currencySymbols: Record<string, string> = {
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  CAD: "C$",
+  CHF: "CHF",
+  SEK: "kr",
+  NOK: "kr",
+  JPY: "¥",
+}
+
+const formatCurrencyValue = (value: number, currency: string) => {
+  const symbol = currencySymbols[currency]
+  return symbol ? `${symbol}${value.toFixed(2)}` : `${currency} ${value.toFixed(2)}`
+}
 
 type RiskComponent = {
   key: string
@@ -23,6 +43,9 @@ type RiskComponent = {
 type HoldingRow = {
   id: string
   ticker: string
+  quoteSymbol?: string
+  priceCurrency?: string
+  localCurrency?: string
   sector: string
   price: number
   weightPct: number
@@ -53,6 +76,10 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
   // modal state
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<HoldingRow | null>(null)
+  const [editHolding, setEditHolding] = useState<HoldingRow | null>(null)
+  const [editQuoteSymbol, setEditQuoteSymbol] = useState("")
+  const [editCurrency, setEditCurrency] = useState("USD")
+  const [savingEdit, setSavingEdit] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -98,6 +125,51 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
 
   const anyCostBasis = !!data?.meta?.anyCostBasis
   const holdings = data?.holdings || []
+  const baseCurrency = data?.meta?.baseCurrency ?? "USD"
+
+  const openEditDialog = (holding: HoldingRow) => {
+    setEditHolding(holding)
+    setEditQuoteSymbol(holding.quoteSymbol ?? holding.ticker)
+    setEditCurrency(holding.localCurrency ?? baseCurrency)
+  }
+
+  const closeEditDialog = () => {
+    setEditHolding(null)
+    setSavingEdit(false)
+  }
+
+  const refreshSnapshot = async (force = false) => {
+    const url = `/api/portfolio/${portfolioId}/holdings?benchmark=${encodeURIComponent(benchmark)}${force ? "&forceRefresh=true" : ""}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`Failed to load holdings (${res.status})`)
+    const json = await res.json()
+    setData(json)
+  }
+
+  const handleEditSave = async () => {
+    if (!editHolding) return
+    try {
+      setSavingEdit(true)
+      const response = await fetch(
+        `/api/portfolio/${portfolioId}/holdings/${editHolding.id}/quote`,
+        withCsrfHeaders({
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ quoteSymbol: editQuoteSymbol, currencyCode: editCurrency }),
+        }),
+      )
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.error ?? "Unable to update listing")
+      }
+      await refreshSnapshot(true)
+      closeEditDialog()
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Unable to update listing")
+    } finally {
+      setSavingEdit(false)
+    }
+  }
 
   const getPerformanceIcon = (value: number) => {
     if (value > 0) return <TrendingUp className="w-4 h-4 text-green-600" />
@@ -189,6 +261,9 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
                 Refreshed {formatDistanceToNow(new Date(data.meta.refreshedAt), { addSuffix: true })}
               </p>
             )}
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+              All values converted to {baseCurrency}.
+            </p>
           </div>
           
         </CardHeader>
@@ -221,13 +296,35 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
                   return (
                     <tr key={h.id} className="border-b hover:bg-slate-50 dark:hover:bg-slate-800/50">
                       <td className="p-3">
-                        <div className="font-mono font-medium text-slate-900 dark:text-slate-100">{h.ticker}</div>
+                        <div className="flex flex-col gap-1">
+                          <div className="font-mono font-medium text-slate-900 dark:text-slate-100">{h.ticker}</div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400">
+                            Quote: {h.quoteSymbol ?? h.ticker}
+                          </div>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            className="w-fit text-xs"
+                            onClick={() => openEditDialog(h)}
+                          >
+                            Edit listing
+                          </Button>
+                        </div>
                       </td>
                       <td className="p-3">
                         <div className="text-slate-900 dark:text-slate-100">{h.sector}</div>
                       </td>
                       <td className="p-3">
-                        <div className="text-slate-900 dark:text-slate-100">${h.price.toFixed(2)}</div>
+                        <div className="text-slate-900 dark:text-slate-100">
+                          {typeof h.price === "number"
+                            ? formatCurrencyValue(h.price, h.priceCurrency || baseCurrency)
+                            : "-"}
+                        </div>
+                        {h.localCurrency && h.localCurrency !== baseCurrency && (
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            FX {h.localCurrency} → {baseCurrency}
+                          </p>
+                        )}
                       </td>
                       <td className="p-3">
                         <div className="space-y-1">
@@ -431,8 +528,46 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
           </AnimatePresence>
         </DialogContent>
       </Dialog>
+      <Dialog open={!!editHolding} onOpenChange={(open) => (!open ? closeEditDialog() : null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Update listing</DialogTitle>
+            <DialogDescription>Adjust the market symbol and native currency used for pricing.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="edit-quote-symbol" className="text-xs uppercase tracking-wide text-slate-500">
+                Quote symbol
+              </Label>
+              <Input
+                id="edit-quote-symbol"
+                value={editQuoteSymbol}
+                onChange={(event) => setEditQuoteSymbol(event.target.value)}
+                placeholder="e.g. ASML"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-currency" className="text-xs uppercase tracking-wide text-slate-500">
+                Listing currency
+              </Label>
+              <Input
+                id="edit-currency"
+                value={editCurrency}
+                onChange={(event) => setEditCurrency(event.target.value.toUpperCase())}
+                placeholder="e.g. USD"
+              />
+            </div>
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={closeEditDialog} disabled={savingEdit}>
+                Cancel
+              </Button>
+              <LoadingButton loading={savingEdit} onClick={handleEditSave}>
+                Save
+              </LoadingButton>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }
-
-

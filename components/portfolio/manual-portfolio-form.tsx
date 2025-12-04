@@ -8,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { Plus, Trash2, AlertCircle, Calculator } from "lucide-react"
+import { Plus, Trash2, AlertCircle } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { TickerAutocomplete } from "./ticker-autocomplete"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
@@ -49,18 +49,6 @@ export function ManualPortfolioForm() {
     setHoldings(holdings.map((h) => (h.id === id ? { ...h, [field]: value } : h)))
   }
 
-  const normalizeWeights = () => {
-    const totalWeight = holdings.reduce((sum, h) => sum + (h.weight || 0), 0)
-    if (totalWeight === 0) return
-
-    setHoldings(
-      holdings.map((h) => ({
-        ...h,
-        weight: (h.weight || 0) / totalWeight,
-      })),
-    )
-  }
-
   const getTotalWeight = () => {
     return holdings.reduce((sum, h) => sum + (h.weight || 0), 0)
   }
@@ -79,7 +67,7 @@ export function ManualPortfolioForm() {
 
     const totalWeight = getTotalWeight()
     if (Math.abs(totalWeight - 1) > 0.01 && Math.abs(totalWeight - 100) > 1) {
-      setError("Total weights should sum to 1 (100%). Use the normalize button to auto-adjust.")
+      setError("Total weights should sum to 1 (100%).")
       return false
     }
 
@@ -128,7 +116,7 @@ export function ManualPortfolioForm() {
         throw new Error(payload?.error ?? "Failed to create portfolio")
       }
 
-      router.push(`/dashboard/portfolio/${payload.portfolioId}`)
+      router.push(`/dashboard/portfolio/${payload.portfolioId}?deferAnalysis=1`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create portfolio")
     } finally {
@@ -179,10 +167,6 @@ export function ManualPortfolioForm() {
               <CardDescription>Add your portfolio holdings with ticker symbols and weights</CardDescription>
             </div>
             <div className="flex items-center space-x-2">
-              <Button variant="outline" size="sm" onClick={normalizeWeights}>
-                <Calculator className="w-4 h-4 mr-2" />
-                Normalize
-              </Button>
               <Button onClick={addHolding} size="sm">
                 <Plus className="w-4 h-4 mr-2" />
                 Add Holding
@@ -274,12 +258,11 @@ export function ManualPortfolioForm() {
             {!isWeightValid && totalWeight > 0 && (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>
+              <AlertDescription>
                   Total weight should equal 100%. Current total: {totalWeight.toFixed(2)}%
-                  {totalWeight > 100 && " (Use the Normalize button to auto-adjust)"}
-                </AlertDescription>
-              </Alert>
-            )}
+              </AlertDescription>
+            </Alert>
+          )}
           </div>
         </CardContent>
       </Card>

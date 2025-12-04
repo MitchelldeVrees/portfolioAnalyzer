@@ -14,9 +14,6 @@ export const SESSION_COOKIE_OPTIONS = {
 export const SESSION_IDLE_COOKIE_NAME = "pa.session.last";
 export const SESSION_ISSUED_COOKIE_NAME = "pa.session.issued";
 export const SESSION_ROLE_COOKIE_NAME = "pa.session.role";
-export const SESSION_AAL_COOKIE_NAME = "pa.session.aal";
-export const SESSION_MFA_REQUIRED_COOKIE_NAME = "pa.session.mfa_required";
-
 export function getSessionRole(user: { email?: string | null; app_metadata?: Record<string, unknown> } | null) {
   if (!user) return "anonymous";
 
@@ -46,4 +43,3 @@ export function getSessionRole(user: { email?: string | null; app_metadata?: Rec
 }
 
 export type SessionRole = ReturnType<typeof getSessionRole>;
-export type SessionAssuranceLevel = "aal1" | "aal2";

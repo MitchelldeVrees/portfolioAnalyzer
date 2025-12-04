@@ -3,17 +3,14 @@ import type { ResponseCookie } from "next/dist/compiled/@edge-runtime/cookies"
 import { NextResponse, type NextRequest } from "next/server"
 
 import {
-  SESSION_AAL_COOKIE_NAME,
   SESSION_ABSOLUTE_TIMEOUT_SECONDS,
   SESSION_COOKIE_OPTIONS,
   SESSION_IDLE_COOKIE_NAME,
   SESSION_IDLE_TIMEOUT_SECONDS,
   SESSION_ISSUED_COOKIE_NAME,
-  SESSION_MFA_REQUIRED_COOKIE_NAME,
   SESSION_ROLE_COOKIE_NAME,
   getSessionRole,
 } from "@/lib/security/session"
-import { MFA_ENABLED } from "@/lib/security/mfa-config"
 import { CSRF_COOKIE_NAME, CSRF_COOKIE_OPTIONS, CSRF_HEADER_NAME, generateCsrfToken } from "@/lib/security/csrf"
 
 type CookieMutation = {
@@ -22,7 +19,7 @@ type CookieMutation = {
   options?: ResponseCookie
 }
 
-const PUBLIC_PATHS = ["/", "/auth/login", "/auth/signup", "/auth/verify-email", "/auth/mfa", "/auth/mfa/setup"]
+const PUBLIC_PATHS = ["/", "/auth/login", "/auth/signup", "/auth/verify-email"]
 
 function applyCookieMutations(response: NextResponse, mutations: CookieMutation[]) {
   for (const { name, value, options } of mutations) {
@@ -39,13 +36,7 @@ function applyCookieMutations(response: NextResponse, mutations: CookieMutation[
 }
 
 function clearSecurityCookies(response: NextResponse) {
-  const names = [
-    SESSION_IDLE_COOKIE_NAME,
-    SESSION_ISSUED_COOKIE_NAME,
-    SESSION_ROLE_COOKIE_NAME,
-    SESSION_AAL_COOKIE_NAME,
-    SESSION_MFA_REQUIRED_COOKIE_NAME,
-  ]
+  const names = [SESSION_IDLE_COOKIE_NAME, SESSION_ISSUED_COOKIE_NAME, SESSION_ROLE_COOKIE_NAME]
   for (const name of names) {
     response.cookies.set(name, "", { ...SESSION_COOKIE_OPTIONS, maxAge: 0 })
   }
@@ -139,8 +130,6 @@ export async function updateSession(request: NextRequest) {
     const issuedRaw = request.cookies.get(SESSION_ISSUED_COOKIE_NAME)?.value
     const lastActiveRaw = request.cookies.get(SESSION_IDLE_COOKIE_NAME)?.value
     const storedRole = request.cookies.get(SESSION_ROLE_COOKIE_NAME)?.value ?? null
-    const storedAal = request.cookies.get(SESSION_AAL_COOKIE_NAME)?.value ?? "aal1"
-    const storedMfaRequired = request.cookies.get(SESSION_MFA_REQUIRED_COOKIE_NAME)?.value ?? "0"
 
     const issuedAt = issuedRaw ? Number(issuedRaw) : null
     const lastActiveAt = lastActiveRaw ? Number(lastActiveRaw) : null
@@ -158,18 +147,6 @@ export async function updateSession(request: NextRequest) {
     }
 
     const currentRole = getSessionRole(user)
-    const metadata = user.app_metadata ?? {}
-    const mfaState = (metadata as any).mfa ?? {}
-    const hasTotp = Boolean(mfaState?.totp?.secret)
-    const credentials = mfaState?.webauthn?.credentials
-    const hasWebAuthn = Array.isArray(credentials) && credentials.length > 0
-    const securityMetadata = (metadata as any).security as { firstLoginComplete?: boolean } | undefined
-    const baseFirstLoginComplete = Boolean(securityMetadata?.firstLoginComplete) || hasTotp || hasWebAuthn
-    const firstLoginComplete = MFA_ENABLED ? baseFirstLoginComplete : true
-    const requiresFirstLoginSetup = MFA_ENABLED && !firstLoginComplete && !hasTotp && !hasWebAuthn
-    const isMfaSetupPath = request.nextUrl.pathname.startsWith("/auth/mfa/setup")
-    const isMfaApi = request.nextUrl.pathname.startsWith("/api/auth/mfa")
-    const isAuthApi = request.nextUrl.pathname.startsWith("/api/auth")
     let sessionRotated = false
 
     if (storedRole && storedRole !== currentRole) {
@@ -189,44 +166,10 @@ export async function updateSession(request: NextRequest) {
     }
 
     const issuedTimestamp = sessionRotated || !issuedAt ? nowSeconds : issuedAt ?? nowSeconds
-    const nextAal = MFA_ENABLED ? (storedAal === "aal2" ? "aal2" : "aal1") : "aal2"
-    const nextMfaRequired = MFA_ENABLED && storedMfaRequired === "1" ? "1" : "0"
-
-    if (requiresFirstLoginSetup && !isMfaSetupPath && !isMfaApi && !isAuthApi) {
-      const url = request.nextUrl.clone()
-      url.pathname = "/auth/mfa/setup"
-      const redirect = NextResponse.redirect(url)
-      redirect.cookies.set(SESSION_ISSUED_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_IDLE_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_ROLE_COOKIE_NAME, currentRole, SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_AAL_COOKIE_NAME, "aal1", SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_MFA_REQUIRED_COOKIE_NAME, "1", SESSION_COOKIE_OPTIONS)
-      return setCsrfCookie(applyCookieMutations(redirect, cookieMutations))
-    }
-
-    const requiresMfa = MFA_ENABLED && (nextMfaRequired === "1" || currentRole === "admin")
-    const isMfaPath = request.nextUrl.pathname.startsWith("/auth/mfa")
-    const isCurrentPathMfaApi = request.nextUrl.pathname.startsWith("/api/auth/mfa")
-
-    if (requiresMfa && nextAal !== "aal2" && !isMfaPath && !isCurrentPathMfaApi) {
-      const url = request.nextUrl.clone()
-      url.pathname = "/auth/mfa"
-      const redirect = NextResponse.redirect(url)
-      redirect.cookies.set(SESSION_ISSUED_COOKIE_NAME, issuedTimestamp.toString(), SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_IDLE_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_ROLE_COOKIE_NAME, currentRole, SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_AAL_COOKIE_NAME, nextAal, SESSION_COOKIE_OPTIONS)
-      redirect.cookies.set(SESSION_MFA_REQUIRED_COOKIE_NAME, nextMfaRequired, SESSION_COOKIE_OPTIONS)
-      return setCsrfCookie(applyCookieMutations(redirect, cookieMutations))
-    }
-
     const response = NextResponse.next({ request })
     response.cookies.set(SESSION_ISSUED_COOKIE_NAME, issuedTimestamp.toString(), SESSION_COOKIE_OPTIONS)
     response.cookies.set(SESSION_IDLE_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
     response.cookies.set(SESSION_ROLE_COOKIE_NAME, currentRole, SESSION_COOKIE_OPTIONS)
-    response.cookies.set(SESSION_AAL_COOKIE_NAME, nextAal, SESSION_COOKIE_OPTIONS)
-    response.cookies.set(SESSION_MFA_REQUIRED_COOKIE_NAME, nextMfaRequired, SESSION_COOKIE_OPTIONS)
-
     return setCsrfCookie(applyCookieMutations(response, cookieMutations))
   } catch (error) {
     console.error("[security] Middleware error:", error)

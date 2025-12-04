@@ -35,13 +35,7 @@ export default function LoginPage() {
         throw new Error(payload?.error ?? "Unable to sign in")
       }
 
-      if (payload?.requiresFirstLoginSetup) {
-        router.push("/auth/mfa/setup")
-      } else if (payload?.requiresMfa) {
-        router.push("/auth/mfa")
-      } else {
-        router.push("/dashboard")
-      }
+      router.push("/dashboard")
     } catch (error: unknown) {
       setError(error instanceof Error ? error.message : "Unable to sign in")
     } finally {

@@ -20,12 +20,16 @@ export type Quote = {
   pe?: number
   dividend?: number
   beta?: number
+  currency?: string
 }
 
 export type OHLCPoint = { date: string; close: number }
 
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || ""
 const YF_BASE = "https://query1.finance.yahoo.com"
+const FX_CACHE_TTL_MS = 5 * 60 * 1000
+
+const fxCache = new Map<string, { rate: number; fetchedAt: number }>()
 
 const DEFAULT_HEADERS = {
   "User-Agent": "portfolio-analyzer/1.0",
@@ -238,6 +242,7 @@ async function yahooQuotesBatch(symbols: string[]): Promise<Record<string, Quote
           pe: asNumber(r.trailingPE),
           dividend: asNumber(r.trailingAnnualDividendRate),
           beta: asNumber(r.beta) || asNumber(r.beta3Year),
+          currency: typeof r.currency === "string" ? r.currency.toUpperCase() : undefined,
         }
       }
     }
@@ -443,6 +448,35 @@ export async function fetchQuotesBatch(symbols: string[]): Promise<Record<string
     }
   }
   return result
+}
+
+export async function fetchFxRate(fromCurrency: string, toCurrency: string): Promise<number> {
+  const from = fromCurrency?.toUpperCase?.() ?? ""
+  const to = toCurrency?.toUpperCase?.() ?? ""
+  if (!from || !to) return 1
+  if (from === to) return 1
+  const key = `${from}->${to}`
+  const cached = fxCache.get(key)
+  const now = Date.now()
+  if (cached && now - cached.fetchedAt < FX_CACHE_TTL_MS) {
+    return cached.rate
+  }
+
+  const pair = `${from}${to}=X`
+  try {
+    const quotes = await yahooQuotesBatch([pair])
+    const quote = quotes?.[pair]
+    const rate = quote?.price
+    if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
+      fxCache.set(key, { rate, fetchedAt: now })
+      return rate
+    }
+  } catch (error) {
+    console.error(`[fx] failed to fetch ${key}:`, (error as Error)?.message ?? error)
+  }
+
+  fxCache.set(key, { rate: 1, fetchedAt: now })
+  return 1
 }
 
 /**

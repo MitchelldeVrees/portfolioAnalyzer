@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { fetchQuotesBatch, fetchHistoryMonthlyClose } from "@/lib/market-data";
+import { fetchQuotesBatch, fetchHistoryMonthlyClose, fetchFxRate } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
 import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
 
@@ -11,6 +11,8 @@ type Holding = {
   weight: number;
   shares?: number;
   purchase_price?: number;
+  currency_code?: string | null;
+  quote_symbol?: string | null;
 };
 
 type PortfolioAnalysisSnapshot = {
@@ -39,6 +41,7 @@ type PortfolioAnalysisSnapshot = {
   meta: {
     benchmark: string;
     refreshedAt: string;
+    baseCurrency?: string;
   };
   dividends?: DividendInsights | null;
 };
@@ -56,6 +59,7 @@ type DividendEvent = {
   shares: number;
   cashAmount: number;
   currency?: string | null;
+  sourceCurrency?: string | null;
 };
 
 type DividendInsights = {
@@ -505,7 +509,7 @@ function buildQuarterBuckets(monthly: DividendTimelinePoint[], year: number): Di
   });
 }
 
-async function buildDividendInsights(holdingsData: Array<any>): Promise<DividendInsights | null> {
+async function buildDividendInsights(holdingsData: Array<any>, baseCurrency: string): Promise<DividendInsights | null> {
   const dividendCandidates = holdingsData
     .filter((holding) => Number(holding?.shares) > 0)
     .sort((a, b) => b.totalValue - a.totalValue)
@@ -515,13 +519,19 @@ async function buildDividendInsights(holdingsData: Array<any>): Promise<Dividend
     return null;
   }
 
-  const tickers = dividendCandidates.map((holding) => holding.ticker);
-  const eventsByTicker = await fetchDividendEventsForTickers(tickers);
+  const tickerMap = dividendCandidates.map((holding) => ({
+    displayTicker: holding.ticker,
+    quoteSymbol: holding.quoteSymbol || holding.ticker,
+  }));
+  const eventsByQuoteSymbol = await fetchDividendEventsForTickers(
+    tickerMap.map((entry) => entry.quoteSymbol),
+  );
   const currentYear = new Date().getFullYear();
 
   const events: DividendEvent[] = [];
   for (const holding of dividendCandidates) {
-    const history = eventsByTicker[holding.ticker] ?? [];
+    const quoteSymbol = holding.quoteSymbol || holding.ticker;
+    const history = eventsByQuoteSymbol[quoteSymbol] ?? [];
     const rawShares = Number(holding.shares ?? 0);
     const shares = Number(rawShares.toFixed(4));
     for (const event of history) {
@@ -542,6 +552,30 @@ async function buildDividendInsights(holdingsData: Array<any>): Promise<Dividend
 
   events.sort((a, b) => a.date.localeCompare(b.date));
 
+  const normalizedBase = (baseCurrency || "USD").toUpperCase();
+  const fxCurrencies = Array.from(
+    new Set(
+      events
+        .map((event) => (event.currency || normalizedBase)?.toUpperCase())
+        .filter((cur): cur is string => !!cur && cur !== normalizedBase),
+    ),
+  );
+  const fxRates: Record<string, number> = {};
+  await Promise.all(
+    fxCurrencies.map(async (cur) => {
+      fxRates[cur] = await fetchFxRate(cur, normalizedBase);
+    }),
+  );
+
+  for (const event of events) {
+    const sourceCurrency = (event.currency || normalizedBase)?.toUpperCase() ?? normalizedBase;
+    const rate = sourceCurrency === normalizedBase ? 1 : fxRates[sourceCurrency] ?? 1;
+    event.amountPerShare = Number((event.amountPerShare * rate).toFixed(4));
+    event.cashAmount = Number((event.cashAmount * rate).toFixed(2));
+    event.sourceCurrency = sourceCurrency;
+    event.currency = normalizedBase;
+  }
+
   const monthlyTotals = buildMonthlyBuckets(events, currentYear);
   const quarterlyTotals = buildQuarterBuckets(monthlyTotals, currentYear);
   const totalIncome = Number(events.reduce((sum, event) => sum + event.cashAmount, 0).toFixed(2));
@@ -557,6 +591,7 @@ async function buildDividendInsights(holdingsData: Array<any>): Promise<Dividend
 
 async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): Promise<PortfolioAnalysisSnapshot> {
   const holdings: Holding[] = Array.isArray(portfolio?.portfolio_holdings) ? portfolio.portfolio_holdings : [];
+  const baseCurrency = (portfolio?.base_currency?.toUpperCase?.() || "USD") as string;
   const refreshedAt = new Date().toISOString();
 
   if (!holdings.length) {
@@ -586,14 +621,23 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
       meta: {
         benchmark: userBenchmark,
         refreshedAt,
+        baseCurrency,
       },
+      dividends: null,
     };
   }
 
-  const symbols = holdings.map((h) => h.ticker);
-  const quotesMap = await fetchQuotesBatch(symbols);
+  const augmented = holdings.map((h) => {
+    const quoteSymbol = (h.quote_symbol?.trim() || h.ticker || "").trim() || h.ticker;
+    const currencyCode = (h.currency_code?.trim()?.toUpperCase() || baseCurrency) as string;
+    return { ...h, quoteSymbol, currencyCode };
+  });
+
+  const tickers = augmented.map((h) => h.ticker);
+  const quoteSymbols = augmented.map((h) => h.quoteSymbol);
+  const quotesMap = await fetchQuotesBatch(quoteSymbols);
   try {
-    await ensureSectors(symbols);
+    await ensureSectors(tickers);
   } catch (error) {
     console.warn("[analysis] sector preload failed", (error as Error)?.message ?? error);
   }
@@ -606,14 +650,59 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
     console.warn('[risk-free] Failed to fetch ^IRX, using fallback 0.05:', (e as Error)?.message || e);
   }
 
-  const holdingsData = holdings.map((h) => {
-    const q = quotesMap[h.ticker] || { price: 100, change: 0, changePercent: 0 };
-    const qty = h.shares ?? (h.weight * 10000) / q.price;
-    const totalValue = q.price * qty;
-    return { ...h, ...q, totalValue, shares: qty };
+  const uniqueCurrencies = Array.from(
+    new Set(
+      augmented
+        .map((h) => h.currencyCode)
+        .filter((cur) => cur && cur !== baseCurrency),
+    ),
+  );
+  const fxRates: Record<string, number> = {};
+  await Promise.all(
+    uniqueCurrencies.map(async (cur) => {
+      fxRates[cur] = await fetchFxRate(cur, baseCurrency);
+    }),
+  );
+
+  const convertAmount = (amount: number | null | undefined, currency?: string | null) => {
+    if (typeof amount !== "number" || Number.isNaN(amount)) return null;
+    const cur = (currency || baseCurrency).toUpperCase();
+    if (cur === baseCurrency) return amount;
+    const rate = fxRates[cur] ?? 1;
+    return amount * rate;
+  };
+
+  const holdingsData = augmented.map((h) => {
+    const quote = quotesMap[h.quoteSymbol] || { price: 100, changePercent: 0, change: 0 };
+    const rawPrice = typeof quote.price === "number" && Number.isFinite(quote.price) ? quote.price : 100;
+    const price = convertAmount(rawPrice, h.currencyCode) ?? rawPrice;
+    const qty =
+      typeof h.shares === "number" && Number.isFinite(h.shares)
+        ? h.shares
+        : (h.weight * 10000) / rawPrice;
+    const shares = Number.isFinite(qty) ? qty : 0;
+    const totalValue = price * shares;
+    const purchaseBase = convertAmount(h.purchase_price ?? null, h.currency_code ?? h.currencyCode);
+    const hasCostBasis = typeof purchaseBase === "number" && Number.isFinite(purchaseBase) && purchaseBase > 0;
+    const returnSincePurchase = hasCostBasis && typeof purchaseBase === "number"
+      ? ((price - purchaseBase) / purchaseBase) * 100
+      : null;
+
+    return {
+      ...h,
+      price,
+      priceCurrency: baseCurrency,
+      localCurrency: h.currencyCode,
+      quoteSymbol: h.quoteSymbol,
+      shares,
+      totalValue,
+      changePercent: typeof quote.changePercent === "number" ? quote.changePercent : 0,
+      change: convertAmount(quote.change ?? 0, h.currencyCode) ?? 0,
+      returnSincePurchase,
+    };
   });
 
-  const dividendInsights = await buildDividendInsights(holdingsData);
+  const dividendInsights = await buildDividendInsights(holdingsData, baseCurrency);
   const totalValue = holdingsData.reduce((s, h) => s + h.totalValue, 0);
   const weights = holdingsData.map((h) => (totalValue > 0 ? h.totalValue / totalValue : 0));
   const dailyPortfolioReturn = holdingsData.reduce((sum, h) => sum + (h.changePercent * h.totalValue) / (totalValue || 1), 0);
@@ -649,9 +738,9 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
   }
 
   const perTicker = await Promise.all(
-    holdings.map(async (h) => {
+    augmented.map(async (h) => {
       try {
-        const pts = await fetchHistoryMonthlyClose(h.ticker, monthsYTD);
+        const pts = await fetchHistoryMonthlyClose(h.quoteSymbol, monthsYTD);
         return { ticker: h.ticker, points: pts, ok: true as const };
       } catch (e) {
         console.warn(`[history] ${h.ticker} failed:`, (e as Error)?.message || e);
@@ -660,7 +749,8 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
     }),
   );
 
-  const hasPortfolioHistory = perTicker.filter(x => x.ok && x.points.length > 1).length / holdings.length > 0.5;
+  const hasPortfolioHistory =
+    perTicker.filter((x) => x.ok && x.points.length > 1).length / augmented.length > 0.5;
   const showBenchmark = benchHistory.length > 1 && hasPortfolioHistory;
 
   let performance: { date: string; portfolio: number; benchmark?: number }[] = [];
@@ -746,7 +836,7 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
   }
 
   const portfolioBetaSpxRaw = await computePortfolioBetaSpx(
-    holdingsData.map((h) => h.ticker),
+    holdingsData.map((h) => h.quoteSymbol || h.ticker),
     weights,
   );
   const portfolioBetaSpx = typeof portfolioBetaSpxRaw === "number" ? Number(portfolioBetaSpxRaw.toFixed(2)) : null;
@@ -786,6 +876,7 @@ async function computeAnalysisSnapshot(portfolio: any, userBenchmark: string): P
     meta: {
       benchmark: userBenchmark,
       refreshedAt,
+      baseCurrency,
     },
   };
 }
@@ -863,4 +954,3 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
-

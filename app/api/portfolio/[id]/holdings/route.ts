@@ -1,7 +1,7 @@
 // /app/api/portfolio/[id]/holdings/route.ts
 import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { fetchQuotesBatch, fetchHistoryMonthlyClose } from "@/lib/market-data";
+import { fetchQuotesBatch, fetchHistoryMonthlyClose, fetchFxRate } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
 import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
 
@@ -11,14 +11,19 @@ type Holding = {
   weight: number;
   shares?: number;
   purchase_price?: number | null;
+  currency_code?: string | null;
+  quote_symbol?: string | null;
 };
 
 type HoldingsSnapshotPayload = {
   holdings: Array<{
     id: string;
     ticker: string;
+    quoteSymbol?: string;
     sector: string;
     price: number;
+    priceCurrency?: string;
+    localCurrency?: string;
     weightPct: number;
     shares: number;
     hasCostBasis: boolean;
@@ -43,6 +48,7 @@ type HoldingsSnapshotPayload = {
     avgBetaWeighted: number;
     riskModel: string;
     refreshedAt: string;
+    baseCurrency: string;
   };
 };
 
@@ -369,9 +375,11 @@ async function persistHoldingsSnapshot(
 async function computeHoldingsSnapshot(
   holdings: Holding[],
   benchmark: string,
+  baseCurrency: string | null,
 ): Promise<HoldingsSnapshotPayload> {
-  const sanitized = Array.isArray(holdings) ? holdings : [];
   const normalizedBenchmark = benchmark || DEFAULT_BENCH;
+  const normalizedBase = (baseCurrency || "USD").toUpperCase();
+  const sanitized = Array.isArray(holdings) ? holdings : [];
   const refreshedAt = new Date().toISOString();
 
   if (!sanitized.length) {
@@ -384,36 +392,76 @@ async function computeHoldingsSnapshot(
         avgBetaWeighted: 0,
         riskModel: "v1.0",
         refreshedAt,
+        baseCurrency: normalizedBase,
       },
     };
   }
 
-  const symbols = sanitized.map((h) => h.ticker);
+  const augmented = sanitized.map((h) => {
+    const quoteSymbol = (h.quote_symbol?.trim() || h.ticker || "").trim() || h.ticker;
+    const currencyCode = (h.currency_code?.trim()?.toUpperCase() || normalizedBase) as string;
+    return {
+      ...h,
+      quoteSymbol,
+      currencyCode,
+    };
+  });
+
+  const tickers = augmented.map((h) => h.ticker);
+  const quoteSymbols = augmented.map((h) => h.quoteSymbol);
+
   try {
-    await ensureSectors(symbols);
+    await ensureSectors(tickers);
   } catch (error) {
     console.warn("[holdings] sector preload failed", (error as Error)?.message ?? error);
   }
-  const quotesMap = (await fetchQuotesBatch(symbols)) || {};
 
-  const temp = sanitized.map((h) => {
-    const quote = quotesMap[h.ticker] || { price: 100 };
-    const price = typeof quote.price === "number" && Number.isFinite(quote.price) ? quote.price : 100;
+  const quotesMap = (await fetchQuotesBatch(quoteSymbols)) || {};
+
+  const uniqueCurrencies = Array.from(
+    new Set(
+      augmented
+        .map((h) => h.currencyCode)
+        .filter((code) => code && code !== normalizedBase),
+    ),
+  );
+  const fxRates: Record<string, number> = {};
+  await Promise.all(
+    uniqueCurrencies.map(async (currency) => {
+      fxRates[currency] = await fetchFxRate(currency, normalizedBase);
+    }),
+  );
+
+  const convertAmount = (amount: number | null | undefined, currency?: string | null) => {
+    if (typeof amount !== "number" || Number.isNaN(amount)) return null;
+    const cur = (currency || normalizedBase).toUpperCase();
+    if (cur === normalizedBase) return amount;
+    const rate = fxRates[cur] ?? 1;
+    return amount * rate;
+  };
+
+  const temp = augmented.map((h) => {
+    const quote = quotesMap[h.quoteSymbol] || { price: 100 };
+    const rawPrice = typeof quote.price === "number" && Number.isFinite(quote.price) ? quote.price : 100;
+    const price = convertAmount(rawPrice, h.currencyCode) ?? rawPrice;
     const sharesRaw =
       typeof h.shares === "number" && Number.isFinite(h.shares)
         ? h.shares
-        : ((h.weight || 0) * 10000) / price;
+        : ((h.weight || 0) * 10000) / rawPrice;
     const shares = Number.isFinite(sharesRaw) ? sharesRaw : 0;
     const totalValue = price * shares;
-    const hasCostBasis = typeof h.purchase_price === "number" && Number.isFinite(h.purchase_price);
-    const returnSincePurchase =
-      hasCostBasis && h.purchase_price
-        ? ((price - h.purchase_price) / h.purchase_price) * 100
-        : null;
+    const purchaseBase = convertAmount(h.purchase_price ?? null, h.currency_code ?? h.currencyCode);
+    const hasCostBasis = typeof purchaseBase === "number" && Number.isFinite(purchaseBase) && purchaseBase > 0;
+    const returnSincePurchase = hasCostBasis && typeof purchaseBase === "number"
+      ? ((price - purchaseBase) / purchaseBase) * 100
+      : null;
 
     return {
       ...h,
       price,
+      priceCurrency: normalizedBase,
+      localCurrency: h.currencyCode,
+      quoteSymbol: h.quoteSymbol,
       shares,
       totalValue,
       hasCostBasis,
@@ -449,7 +497,7 @@ async function computeHoldingsSnapshot(
   const benchNorm = benchIndex.map((v) => (v / benchBase) * 100);
 
   const historyEntries = await Promise.all(
-    symbols.map(async (sym) => {
+    quoteSymbols.map(async (sym) => {
       try {
         const pts = await fetchHistoryMonthlyClose(sym, 12);
         return [sym, pts] as const;
@@ -461,7 +509,7 @@ async function computeHoldingsSnapshot(
   const historyMap = Object.fromEntries(historyEntries);
 
   const riskInputsEntries = await Promise.all(
-    symbols.map(async (sym) => {
+    quoteSymbols.map(async (sym) => {
       const [hist, fundamentals] = await Promise.all([fetchHistRisk(sym), fetchFundamentals(sym)]);
       return [
         sym,
@@ -486,7 +534,7 @@ async function computeHoldingsSnapshot(
   const riskInputsBySymbol = Object.fromEntries(riskInputsEntries);
 
   const final = enriched.map((h) => {
-    const pts = (historyMap[h.ticker] as { date: string; close: number }[]) || [];
+    const pts = (historyMap[h.quoteSymbol] as { date: string; close: number }[]) || [];
 
     let fallbackVol12m: number | null = null;
     let fallbackBeta12m: number | null = null;
@@ -502,7 +550,7 @@ async function computeHoldingsSnapshot(
       }
     }
 
-    const inputs = riskInputsBySymbol[h.ticker];
+    const inputs = riskInputsBySymbol[h.quoteSymbol];
 
     const volatility12m =
       (inputs?.vol12mPct != null ? inputs.vol12mPct : null) ?? fallbackVol12m;
@@ -518,6 +566,9 @@ async function computeHoldingsSnapshot(
     return {
       id: h.id,
       ticker: h.ticker,
+      quoteSymbol: h.quoteSymbol,
+      priceCurrency: h.priceCurrency,
+      localCurrency: h.localCurrency,
       sector: h.sector,
       price: Number(h.price.toFixed(2)),
       weightPct: Number(h.weightPct.toFixed(2)),
@@ -550,6 +601,7 @@ async function computeHoldingsSnapshot(
       avgBetaWeighted,
       riskModel: "v1.0",
       refreshedAt,
+      baseCurrency: normalizedBase,
     },
   };
 }
@@ -578,7 +630,11 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       }
     }
 
-    const snapshot = await computeHoldingsSnapshot(portfolio.portfolio_holdings || [], benchmark);
+    const snapshot = await computeHoldingsSnapshot(
+      portfolio.portfolio_holdings || [],
+      benchmark,
+      portfolio.base_currency || null,
+    );
 
     try {
       await persistHoldingsSnapshot(supabase, params.id, benchmark, snapshot, auth.user.id);
@@ -618,7 +674,11 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       return NextResponse.json({ error: "Portfolio not found" }, { status: 404 });
     }
 
-    const snapshot = await computeHoldingsSnapshot(portfolio.portfolio_holdings || [], benchmark);
+    const snapshot = await computeHoldingsSnapshot(
+      portfolio.portfolio_holdings || [],
+      benchmark,
+      portfolio.base_currency || null,
+    );
     await persistHoldingsSnapshot(supabase, params.id, benchmark, snapshot, auth.user.id);
 
     return NextResponse.json({ status: "ok", snapshot });

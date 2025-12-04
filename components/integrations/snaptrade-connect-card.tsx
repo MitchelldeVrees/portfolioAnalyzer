@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 
 type SnaptradeBrokerage = {
   id: string
@@ -20,11 +21,14 @@ type SnaptradeBrokerage = {
 type SnaptradePosition = {
   units?: number | null
   price?: number | null
+  average_purchase_price?: number | null
+  currency?: { code?: string | null } | string | null
   symbol?: {
     symbol?: {
       symbol?: string
       raw_symbol?: string
       description?: string | null
+      currency?: { code?: string | null } | null
     }
   }
 }
@@ -32,15 +36,13 @@ type SnaptradePosition = {
 type SnaptradeAccountHolding = {
   account?: {
     id?: string
+    account_id?: string
+    accountId?: string
     name?: string | null
     number?: string | null
     type?: string | null
   }
   positions?: SnaptradePosition[] | null
-  balances?: Array<{
-    currency?: string | null
-    cash?: number | null
-  }>
 }
 
 type SnaptradeConnection = {
@@ -63,11 +65,35 @@ export function SnaptradeConnectCard() {
   const [loadingConnections, setLoadingConnections] = useState(false)
   const [holdings, setHoldings] = useState<SnaptradeAccountHolding[]>([])
   const [loadingHoldings, setLoadingHoldings] = useState(false)
+  const [creatingPortfolio, setCreatingPortfolio] = useState<string | null>(null)
+  const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState("")
   const [currentPage, setCurrentPage] = useState(1)
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null)
+  const [portfolioNames, setPortfolioNames] = useState<Record<string, string>>({})
+  const [portfolioBaseCurrencies, setPortfolioBaseCurrencies] = useState<Record<string, string>>({})
   const pageSize = 9
+
+  const BASE_CURRENCY_OPTIONS = ["USD", "EUR", "GBP", "CAD", "CHF", "SEK", "NOK", "JPY"]
+
+  const normalizeCurrencyCode = (value?: { code?: string | null } | string | null) => {
+    if (!value) return null
+    if (typeof value === "string") return value.trim().toUpperCase() || null
+    const code = value.code ?? null
+    return code ? code.trim().toUpperCase() : null
+  }
+
+  const detectAccountCurrency = (account: SnaptradeAccountHolding) => {
+    const positions = account.positions ?? []
+    for (const position of positions ?? []) {
+      const candidate =
+        normalizeCurrencyCode(position.currency ?? null) ||
+        normalizeCurrencyCode(position.symbol?.symbol?.currency ?? null)
+      if (candidate) return candidate
+    }
+    return null
+  }
 
   useEffect(() => {
     loadBrokerages()
@@ -88,7 +114,6 @@ export function SnaptradeConnectCard() {
       }
       setBrokerages(Array.isArray(payload?.brokerages) ? payload.brokerages : [])
       setError(null)
-      await fetchConnections()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load broker list")
     } finally {
@@ -134,6 +159,7 @@ export function SnaptradeConnectCard() {
       } else {
         setHoldings([])
       }
+      setStatusMessage("Holdings snapshot updated.")
       setError(null)
       setLastSyncedAt(new Date())
     } catch (err) {
@@ -163,12 +189,46 @@ export function SnaptradeConnectCard() {
       if (url) {
         window.open(url, "_blank", "noopener,noreferrer")
       }
+      setStatusMessage("SnapTrade portal opened in a new tab.")
       setError(null)
       await fetchConnections()
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to open SnapTrade portal")
     } finally {
       setConnectingSlug(null)
+    }
+  }
+
+  const createPortfolio = async (accountId: string, fallbackName?: string | null, fallbackCurrency?: string | null) => {
+    setCreatingPortfolio(accountId)
+    setStatusMessage(null)
+    const portfolioName = getPortfolioName(accountId, fallbackName)
+    const baseCurrency = getPortfolioBaseCurrency(accountId, fallbackCurrency)
+    try {
+      const response = await fetch(
+        "/api/integrations/snaptrade/portfolio",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accountId, portfolioName, baseCurrency }),
+        }),
+      )
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to create portfolio")
+      }
+      setStatusMessage(
+        payload?.portfolios?.length
+          ? `Created portfolio${payload.portfolios.length > 1 ? "s" : ""}: ${payload.portfolios
+              .map((p: any) => p.name)
+              .join(", ")}`
+          : "Portfolio created."
+      )
+      await fetchHoldings()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create portfolio")
+    } finally {
+      setCreatingPortfolio(null)
     }
   }
 
@@ -189,6 +249,65 @@ export function SnaptradeConnectCard() {
     setCurrentPage((page) => Math.min(page, totalPages))
   }, [totalPages])
 
+  function resolveAccountId(account: SnaptradeAccountHolding["account"]) {
+    if (!account) return null
+    return account.id ?? account.account_id ?? account.accountId ?? account.number ?? null
+  }
+
+  useEffect(() => {
+    setPortfolioNames((prev) => {
+      const next: Record<string, string> = {}
+      for (const account of holdings) {
+        const accountId = resolveAccountId(account.account)
+        if (!accountId) continue
+        const fallbackName =
+          account.account?.name || account.account?.number || `SnapTrade account ${accountId.slice(-4)}`
+        next[accountId] = prev[accountId] ?? fallbackName
+      }
+      const changed =
+        Object.keys(next).length !== Object.keys(prev).length ||
+        Object.keys(next).some((key) => next[key] !== prev[key])
+      return changed ? next : prev
+    })
+
+    setPortfolioBaseCurrencies((prev) => {
+      const next: Record<string, string> = {}
+      for (const account of holdings) {
+        const accountId = resolveAccountId(account.account)
+        if (!accountId) continue
+        const fallbackCurrency = detectAccountCurrency(account) ?? "USD"
+        next[accountId] = prev[accountId] ?? fallbackCurrency
+      }
+      const changed =
+        Object.keys(next).length !== Object.keys(prev).length ||
+        Object.keys(next).some((key) => next[key] !== prev[key])
+      return changed ? next : prev
+    })
+  }, [holdings])
+
+  function getPortfolioName(accountId: string | null, fallback?: string | null) {
+    if (!accountId) return fallback ?? "SnapTrade portfolio"
+    return portfolioNames[accountId] ?? fallback ?? "SnapTrade portfolio"
+  }
+
+  const handlePortfolioNameChange = (accountId: string, value: string) => {
+    setPortfolioNames((prev) => ({
+      ...prev,
+      [accountId]: value,
+    }))
+  }
+
+  function getPortfolioBaseCurrency(accountId: string | null, fallback?: string | null) {
+    if (!accountId) return fallback ?? "USD"
+    return portfolioBaseCurrencies[accountId] ?? fallback ?? "USD"
+  }
+
+  const handleBaseCurrencyChange = (accountId: string, value: string) => {
+    setPortfolioBaseCurrencies((prev) => ({
+      ...prev,
+      [accountId]: value.toUpperCase(),
+    }))
+  }
 
   return (
     <Card className="border-slate-200 shadow-sm">
@@ -205,37 +324,35 @@ export function SnaptradeConnectCard() {
           </div>
         )}
 
+        {statusMessage && (
+          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+            {statusMessage}
+          </div>
+        )}
+
         {connections.length > 0 && (
-          <section className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+          <section className="space-y-3 rounded-lg border border-slate-200 bg-slate-50/70 p-4">
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-slate-700">Linked brokers</h3>
                 <p className="text-xs text-slate-500">
                   {connections.length === 1
-                    ? "One connection is active through SnapTrade."
-                    : `${connections.length} connections are active through SnapTrade.`}
+                    ? "1 connection active via SnapTrade"
+                    : `${connections.length} connections active via SnapTrade`}
                 </p>
               </div>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" onClick={fetchConnections} disabled={loadingConnections}>
-                  {loadingConnections ? "Refreshing..." : "Refresh status"}
+                  {loadingConnections ? "Refreshing…" : "Refresh status"}
                 </Button>
-                <LoadingButton
-                  variant="secondary"
-                  size="sm"
-                  loading={loadingHoldings}
-                  onClick={fetchHoldings}
-                >
-                  {loadingHoldings ? "Fetching holdings..." : "Fetch holdings"}
+                <LoadingButton variant="secondary" size="sm" loading={loadingHoldings} onClick={fetchHoldings}>
+                  {loadingHoldings ? "Fetching holdings…" : "Fetch holdings"}
                 </LoadingButton>
               </div>
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               {connections.map((connection) => (
-                <div
-                  key={connection.id}
-                  className="rounded-md border border-white bg-white/80 px-4 py-3 shadow-sm"
-                >
+                <div key={connection.id} className="rounded-md border border-white bg-white px-4 py-3 shadow-sm">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <p className="font-medium text-slate-900">
@@ -255,7 +372,7 @@ export function SnaptradeConnectCard() {
                   </div>
                   {connection.disabled && (
                     <p className="mt-2 text-xs text-amber-800">
-                      Awaiting brokerage confirmation. You can still start new connections meanwhile.
+                      Awaiting brokerage confirmation. Fetch holdings again once approved.
                     </p>
                   )}
                 </div>
@@ -358,15 +475,67 @@ export function SnaptradeConnectCard() {
               )}
             </div>
             {holdings.map((account, idx) => {
+              const accountId = resolveAccountId(account.account)
               const name =
                 account.account?.name || account.account?.number || `Linked account ${idx + 1}`
               const positions = Array.isArray(account.positions) ? account.positions.slice(0, 5) : []
+              const fallbackCurrency = detectAccountCurrency(account) ?? "USD"
               return (
-                <div key={`${account.account?.id ?? idx}`} className="rounded-lg border border-slate-200 p-4 space-y-3">
+                <div key={`${accountId ?? idx}`} className="rounded-lg border border-slate-200 p-4 space-y-3">
                   <div className="flex flex-col gap-1">
-                    <p className="font-medium text-slate-900">{name}</p>
-                    {account.account?.type && (
-                      <p className="text-xs uppercase tracking-wide text-slate-500">{account.account.type}</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="font-medium text-slate-900">{name}</p>
+                        {account.account?.type && (
+                          <p className="text-xs uppercase tracking-wide text-slate-500">{account.account.type}</p>
+                        )}
+                      </div>
+                      {accountId && (
+                        <LoadingButton
+                          loading={creatingPortfolio === accountId}
+                          onClick={() => createPortfolio(accountId, name, fallbackCurrency)}
+                          size="sm"
+                        >
+                          Create portfolio
+                        </LoadingButton>
+                      )}
+                    </div>
+                    {accountId && (
+                      <div className="space-y-1">
+                        <Label htmlFor={`portfolio-name-${accountId}`} className="text-xs font-medium text-slate-600">
+                          Portfolio name
+                        </Label>
+                        <Input
+                          id={`portfolio-name-${accountId}`}
+                          value={getPortfolioName(accountId, name)}
+                          onChange={(event) => handlePortfolioNameChange(accountId, event.target.value)}
+                          placeholder="Custom portfolio name"
+                          className="h-8 text-sm"
+                        />
+                        <Label htmlFor={`portfolio-currency-${accountId}`} className="text-xs font-medium text-slate-600">
+                          Base currency
+                        </Label>
+                        {(() => {
+                          const baseValue = getPortfolioBaseCurrency(accountId, fallbackCurrency)
+                          const options = BASE_CURRENCY_OPTIONS.includes(baseValue)
+                            ? BASE_CURRENCY_OPTIONS
+                            : [baseValue, ...BASE_CURRENCY_OPTIONS]
+                          return (
+                            <select
+                              id={`portfolio-currency-${accountId}`}
+                              className="h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-sm"
+                              value={baseValue}
+                              onChange={(event) => handleBaseCurrencyChange(accountId, event.target.value)}
+                            >
+                              {options.map((option) => (
+                                <option key={`${accountId}-${option}`} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          )
+                        })()}
+                      </div>
                     )}
                   </div>
                   {positions.length === 0 ? (
@@ -384,15 +553,17 @@ export function SnaptradeConnectCard() {
                         <tbody>
                           {positions.map((position, positionIdx) => {
                             const ticker =
-                              position.symbol?.symbol?.symbol ??
                               position.symbol?.symbol?.raw_symbol ??
+                              position.symbol?.symbol?.symbol ??
                               "—"
                             const description = position.symbol?.symbol?.description ?? ""
                             return (
                               <tr key={`${ticker}-${positionIdx}`} className="border-t border-slate-100">
                                 <td className="py-2 pr-4">
                                   <span className="font-medium text-slate-900">{ticker}</span>
-                                  {description && <span className="block text-xs text-slate-500">{description}</span>}
+                                  {description && (
+                                    <span className="block text-xs text-slate-500">{description}</span>
+                                  )}
                                 </td>
                                 <td className="py-2 pr-4">{position.units ?? "—"}</td>
                                 <td className="py-2 pr-4">

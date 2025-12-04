@@ -8,6 +8,22 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { FileDown } from "lucide-react"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
+const currencySymbols: Record<string, string> = {
+  USD: "$",
+  EUR: "€",
+  GBP: "£",
+  CAD: "C$",
+  CHF: "CHF",
+  SEK: "kr",
+  NOK: "kr",
+  JPY: "¥",
+}
+
+const formatCurrencyValue = (value: number, currency: string) => {
+  const symbol = currencySymbols[currency]
+  return symbol ? `${symbol}${value.toFixed(2)}` : `${currency} ${value.toFixed(2)}`
+}
+
 type DataResponse = {
   holdings: Array<{
     id: string
@@ -37,6 +53,9 @@ type DataResponse = {
     concentration: { level: string; largestPositionPct: number }
     diversification: { score: number; holdings: number; top2Pct: number }
     beta: { level: string; value: number }
+  }
+  meta?: {
+    baseCurrency?: string
   }
 }
 
@@ -117,12 +136,15 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
     return <div className="text-red-600 dark:text-red-400">{err || "Failed to load"}</div>
   }
 
+  const baseCurrency = data.meta?.baseCurrency ?? "USD"
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">Monthly Portfolio Summary</h1>
           <p className="text-slate-600 dark:text-slate-400">{portfolioName}</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">All values in {baseCurrency}.</p>
         </div>
         <LoadingButton
           onClick={handleDownload}
@@ -203,7 +225,11 @@ export function SummaryView({ portfolioId, portfolioName }: { portfolioId: strin
                     <td className="py-2 font-medium">{h.ticker}</td>
                     <td className="py-2">{h.weightPct.toFixed(2)}%</td>
                     <td className="py-2">{h.shares.toFixed(2)}</td>
-                    <td className="py-2">{typeof h.price === "number" ? `$${h.price.toFixed(2)}` : "N/A"}</td>
+                    <td className="py-2">
+                      {typeof h.price === "number"
+                        ? formatCurrencyValue(h.price, baseCurrency)
+                        : "N/A"}
+                    </td>
                     <td className="py-2">{h.returnSincePurchase != null ? `${h.returnSincePurchase.toFixed(2)}%` : "N/A"}</td>
                     <td className="py-2">{h.contributionPct != null ? `${h.contributionPct.toFixed(2)}%` : "N/A"}</td>
                   </tr>

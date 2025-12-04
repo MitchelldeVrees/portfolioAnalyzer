@@ -3,22 +3,12 @@ import type { ResponseCookie } from "next/dist/compiled/@edge-runtime/cookies"
 import { NextResponse, type NextRequest } from "next/server"
 
 import {
-  SESSION_AAL_COOKIE_NAME,
   SESSION_COOKIE_OPTIONS,
   SESSION_IDLE_COOKIE_NAME,
   SESSION_ISSUED_COOKIE_NAME,
-  SESSION_MFA_REQUIRED_COOKIE_NAME,
   SESSION_ROLE_COOKIE_NAME,
-  SessionAssuranceLevel,
   getSessionRole,
 } from "@/lib/security/session"
-import { MFA_ENABLED } from "@/lib/security/mfa-config"
-import {
-  hasTotpFactor,
-  hasWebAuthnFactor,
-  readMfaState,
-  toPublicMfaState,
-} from "@/lib/security/mfa-store"
 
 type CookieMutation = {
   name: string
@@ -79,36 +69,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid credentials" }, { status })
   }
 
-  const { user } = data
-  const { state } = await readMfaState(user.id)
-
-  const userRole = getSessionRole(user)
-  const hasTotp = hasTotpFactor(state)
-  const hasWebAuthn = hasWebAuthnFactor(state)
-  const securityMetadata = (user.app_metadata?.security ?? null) as { firstLoginComplete?: boolean } | null
-  const firstLoginComplete = Boolean(securityMetadata?.firstLoginComplete)
-
-  const requiresMfa = MFA_ENABLED && (userRole === "admin" || hasTotp || hasWebAuthn)
-  const needsEnrollment = MFA_ENABLED && userRole === "admin" && !hasTotp && !hasWebAuthn
-  const requiresFirstLoginSetup = MFA_ENABLED && !firstLoginComplete && !hasTotp && !hasWebAuthn
-
   const nowSeconds = Math.floor(Date.now() / 1000)
-  const assuranceLevel: SessionAssuranceLevel = requiresMfa ? "aal1" : "aal2"
-  const mfaRequiredFlag = requiresMfa ? "1" : "0"
+  const { user } = data
+  const userRole = getSessionRole(user)
 
   const response = NextResponse.json(
-    {
-      ok: true,
-      requiresMfa,
-      needsEnrollment,
-      requiresFirstLoginSetup,
-      mfa: toPublicMfaState(state),
-    },
+    { ok: true },
     { status: 200 },
   )
 
-  response.cookies.set(SESSION_AAL_COOKIE_NAME, assuranceLevel, SESSION_COOKIE_OPTIONS)
-  response.cookies.set(SESSION_MFA_REQUIRED_COOKIE_NAME, mfaRequiredFlag, SESSION_COOKIE_OPTIONS)
   response.cookies.set(SESSION_IDLE_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
   response.cookies.set(SESSION_ISSUED_COOKIE_NAME, nowSeconds.toString(), SESSION_COOKIE_OPTIONS)
   response.cookies.set(SESSION_ROLE_COOKIE_NAME, userRole, SESSION_COOKIE_OPTIONS)

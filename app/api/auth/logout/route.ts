@@ -2,14 +2,7 @@ import { createServerClient } from "@supabase/ssr"
 import type { ResponseCookie } from "next/dist/compiled/@edge-runtime/cookies"
 import { NextResponse, type NextRequest } from "next/server"
 
-import {
-  SESSION_AAL_COOKIE_NAME,
-  SESSION_COOKIE_OPTIONS,
-  SESSION_IDLE_COOKIE_NAME,
-  SESSION_ISSUED_COOKIE_NAME,
-  SESSION_MFA_REQUIRED_COOKIE_NAME,
-  SESSION_ROLE_COOKIE_NAME,
-} from "@/lib/security/session"
+import { SESSION_COOKIE_OPTIONS, SESSION_IDLE_COOKIE_NAME, SESSION_ISSUED_COOKIE_NAME, SESSION_ROLE_COOKIE_NAME } from "@/lib/security/session"
 
 type CookieMutation = {
   name: string
@@ -32,13 +25,7 @@ function applyCookieMutations(response: NextResponse, mutations: CookieMutation[
 }
 
 function clearSessionCookies(response: NextResponse) {
-  const names = [
-    SESSION_ROLE_COOKIE_NAME,
-    SESSION_AAL_COOKIE_NAME,
-    SESSION_MFA_REQUIRED_COOKIE_NAME,
-    SESSION_IDLE_COOKIE_NAME,
-    SESSION_ISSUED_COOKIE_NAME,
-  ]
+  const names = [SESSION_ROLE_COOKIE_NAME, SESSION_IDLE_COOKIE_NAME, SESSION_ISSUED_COOKIE_NAME]
   for (const name of names) {
     response.cookies.set(name, "", { ...SESSION_COOKIE_OPTIONS, maxAge: 0 })
   }
