@@ -99,7 +99,7 @@ export function ConnectPortfolioContent() {
             </div>
             <CardTitle className="text-slate-900 dark:text-slate-100">Connect your broker</CardTitle>
             <CardDescription className="text-sm">
-              Launch the SnapTrade flow to select Interactive Brokers and other supported custodians.
+              Launch the broker connection flow to select Interactive Brokers or other supported custodians.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -127,7 +127,7 @@ export function ConnectPortfolioContent() {
             </CardHeader>
             <CardContent className="space-y-5 text-sm text-slate-600 dark:text-slate-300">
               <ul className="space-y-2">
-                <li>• Format: UTF-8 encoded <strong>.csv</strong>, up to <strong>10 MB</strong> or <strong>10,000 rows</strong>.</li>
+                <li>• Format:<strong>.csv</strong>, up to <strong>10 MB</strong> or <strong>10,000 rows</strong>.</li>
                 <li>• First row must contain headers; additional metadata columns are welcome.</li>
                 <li>• Required column: <strong>Ticker</strong>. Optional columns: Weight (%), Shares, PurchasePrice.</li>
                 <li>• Percentages can be decimals (0.12) or percents (12%). We handle currency symbols.</li>
@@ -142,9 +142,6 @@ export function ConnectPortfolioContent() {
                     </Badge>
                   ))}
                 </div>
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  Other Bloomberg fields (ISIN, CUSIP, sector, market value, etc.) can be mapped later in the wizard.
-                </p>
               </div>
 
               <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
@@ -177,15 +174,6 @@ export function ConnectPortfolioContent() {
                     className="text-blue-600 hover:underline dark:text-blue-400"
                   >
                     Download template CSV
-                  </Link>
-                  <Link
-                    href="https://docs.portify.app/csv-upload"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-blue-600 hover:underline dark:text-blue-400"
-                  >
-                    <HelpCircle className="h-4 w-4" />
-                    Need help?
                   </Link>
                 </div>
               </div>
@@ -225,11 +213,6 @@ export function ConnectPortfolioContent() {
                     rows={3}
                   />
                 </div>
-
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  This information helps Portify label analytics and AI research for you. You can edit it anytime from the
-                  portfolio settings page.
-                </p>
               </CardContent>
             </Card>
 

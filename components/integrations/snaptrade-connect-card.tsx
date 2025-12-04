@@ -41,6 +41,12 @@ type SnaptradeAccountHolding = {
     name?: string | null
     number?: string | null
     type?: string | null
+    balance?: {
+      total?: {
+        amount?: number | null
+        currency?: string | null
+      }
+    }
   }
   positions?: SnaptradePosition[] | null
 }
@@ -71,8 +77,10 @@ export function SnaptradeConnectCard() {
   const [searchTerm, setSearchTerm] = useState("")
   const [currentPage, setCurrentPage] = useState(1)
   const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null)
-  const [portfolioNames, setPortfolioNames] = useState<Record<string, string>>({})
-  const [portfolioBaseCurrencies, setPortfolioBaseCurrencies] = useState<Record<string, string>>({})
+  const [pendingBroker, setPendingBroker] = useState<string | null>(null)
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null)
+  const [snaptradeSummary, setSnaptradeSummary] = useState<{ total: number; currency?: string | null } | null>(null)
+  const [autoSyncTriggered, setAutoSyncTriggered] = useState(false)
   const pageSize = 9
 
   const BASE_CURRENCY_OPTIONS = ["USD", "EUR", "GBP", "CAD", "CHF", "SEK", "NOK", "JPY"]
@@ -127,7 +135,7 @@ export function SnaptradeConnectCard() {
       const response = await fetch("/api/integrations/snaptrade/connections")
       const payload = await response.json()
       if (response.status === 503) {
-        setError("SnapTrade is not configured on this environment.")
+        setError("Broker flow is not configured on this environment.")
         setConnections([])
         return
       }
@@ -135,6 +143,8 @@ export function SnaptradeConnectCard() {
         throw new Error(payload?.error ?? "Unable to load connections")
       }
       setConnections(Array.isArray(payload?.connections) ? payload.connections : [])
+      setPendingBroker(payload?.pendingBroker ?? null)
+      setPendingMessage(payload?.pendingMessage ?? null)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load connections")
@@ -152,6 +162,15 @@ export function SnaptradeConnectCard() {
         throw new Error(payload?.error ?? "Unable to load holdings")
       }
       const data = payload?.holdings
+      const summary = payload?.summary
+      if (summary && typeof summary.total === "number") {
+        setSnaptradeSummary({
+          total: summary.total,
+          currency: summary.currency ?? undefined,
+        })
+      } else {
+        setSnaptradeSummary(null)
+      }
       if (Array.isArray(data)) {
         setHoldings(data)
       } else if (data && Array.isArray(data.accounts)) {
@@ -163,13 +182,31 @@ export function SnaptradeConnectCard() {
       setError(null)
       setLastSyncedAt(new Date())
     } catch (err) {
+      setHoldings([])
+      setLastSyncedAt(null)
       setError(err instanceof Error ? err.message : "Failed to load holdings")
+      setSnaptradeSummary(null)
     } finally {
       setLoadingHoldings(false)
     }
   }
 
+  useEffect(() => {
+    if (connections.length === 0) {
+      setAutoSyncTriggered(false)
+      return
+    }
+    if (!autoSyncTriggered && connections.length > 0 && holdings.length === 0 && !loadingHoldings) {
+      setAutoSyncTriggered(true)
+      void fetchHoldings()
+    }
+  }, [connections.length, holdings.length, loadingHoldings, autoSyncTriggered])
+
   const openConnectionPortal = async (broker?: string | null) => {
+    if (connections.length > 0) {
+      setError("You already have an active broker connection. Remove it before linking another.")
+      return
+    }
     try {
       setConnectingSlug(broker ?? "__any__")
       const response = await fetch(
@@ -242,6 +279,18 @@ export function SnaptradeConnectCard() {
     })
   }, [brokerages, searchTerm])
 
+  const formattedSnaptradeBalance = useMemo(() => {
+    if (!snaptradeSummary || typeof snaptradeSummary.total !== "number") return null
+    try {
+      const currency = snaptradeSummary.currency ?? "USD"
+      return new Intl.NumberFormat(navigator.language, { style: "currency", currency }).format(
+        snaptradeSummary.total,
+      )
+    } catch {
+      return `${snaptradeSummary.total.toFixed(2)}${snaptradeSummary.currency ? ` ${snaptradeSummary.currency}` : ""}`
+    }
+  }, [snaptradeSummary])
+
   const totalPages = Math.max(1, Math.ceil(filteredBrokerages.length / pageSize))
   const pagedBrokerages = filteredBrokerages.slice((currentPage - 1) * pageSize, currentPage * pageSize)
 
@@ -313,9 +362,6 @@ export function SnaptradeConnectCard() {
     <Card className="border-slate-200 shadow-sm">
       <CardHeader className="flex flex-col gap-2">
         <CardTitle>Connect your broker</CardTitle>
-        <CardDescription>
-          Use SnapTrade to link your brokerage accounts and sync live portfolio holdings into Portify.
-        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         {error && (
@@ -337,8 +383,8 @@ export function SnaptradeConnectCard() {
                 <h3 className="text-sm font-semibold text-slate-700">Linked brokers</h3>
                 <p className="text-xs text-slate-500">
                   {connections.length === 1
-                    ? "1 connection active via SnapTrade"
-                    : `${connections.length} connections active via SnapTrade`}
+                    ? "One connection is active according to our system."
+                    : `${connections.length} connections are active according to our system.`}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -393,16 +439,22 @@ export function SnaptradeConnectCard() {
                 onChange={(event) => setSearchTerm(event.target.value)}
               />
             </div>
-            <Button
-              variant="outline"
-              onClick={() => openConnectionPortal(null)}
-              disabled={connectingSlug === "__any__"}
-            >
-              {connectingSlug === "__any__" ? "Starting SnapTrade…" : "Open SnapTrade portal"}
-            </Button>
+            
           </div>
 
-          {loadingBrokers && <p className="text-sm text-slate-500">Loading brokerages…</p>}
+          {connections.length === 0 && (
+            <p className="text-sm text-slate-600 dark:text-slate-400">
+              Connect a brokerage to import holdings automatically. Only one broker can be active per account.
+            </p>
+          )}
+          {pendingBroker && pendingMessage && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              <p className="font-semibold">Waiting on {pendingBroker}</p>
+              <p>{pendingMessage}</p>
+            </div>
+          )}
+
+          {loadingBrokers && <p className="text-sm text-slate-500">Loading brokerages</p>}
           {!loadingBrokers && filteredBrokerages.length === 0 && (
             <p className="text-sm text-slate-500">No brokerages match your search.</p>
           )}
@@ -427,14 +479,20 @@ export function SnaptradeConnectCard() {
                     {broker.description && <p className="text-xs text-slate-500">{broker.description}</p>}
                   </div>
                 </div>
-                <LoadingButton
-                  variant="outline"
-                  className="mt-auto"
-                  loading={connectingSlug === broker.slug}
-                  onClick={() => openConnectionPortal(broker.slug)}
-                >
-                  Connect
-                </LoadingButton>
+                {connections.length > 0 ? (
+                  <Button variant="outline" className="mt-auto" disabled>
+                    Broker linked
+                  </Button>
+                ) : (
+                  <LoadingButton
+                    variant="outline"
+                    className="mt-auto"
+                    loading={connectingSlug === broker.slug}
+                    onClick={() => openConnectionPortal(broker.slug)}
+                  >
+                    Connect
+                  </LoadingButton>
+                )}
               </div>
             ))}
           </div>
@@ -478,64 +536,29 @@ export function SnaptradeConnectCard() {
               const accountId = resolveAccountId(account.account)
               const name =
                 account.account?.name || account.account?.number || `Linked account ${idx + 1}`
+                console.log('account', account);
               const positions = Array.isArray(account.positions) ? account.positions.slice(0, 5) : []
-              const fallbackCurrency = detectAccountCurrency(account) ?? "USD"
+              const totalValue = account.total_value.value ?? null
+              const totalCurrency = account.total_value.currency ?? snaptradeSummary?.currency ?? "USD"
+              const formattedValue =
+                typeof totalValue === "number"
+                  ? new Intl.NumberFormat("en-US", { style: "currency", currency: totalCurrency ?? "USD" }).format(
+                      totalValue,
+                    )
+                  : null
               return (
                 <div key={`${accountId ?? idx}`} className="rounded-lg border border-slate-200 p-4 space-y-3">
                   <div className="flex flex-col gap-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <div>
-                        <p className="font-medium text-slate-900">{name}</p>
-                        {account.account?.type && (
-                          <p className="text-xs uppercase tracking-wide text-slate-500">{account.account.type}</p>
-                        )}
-                      </div>
-                      {accountId && (
-                        <LoadingButton
-                          loading={creatingPortfolio === accountId}
-                          onClick={() => createPortfolio(accountId, name, fallbackCurrency)}
-                          size="sm"
-                        >
-                          Create portfolio
-                        </LoadingButton>
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="font-medium text-slate-900">{name}</p>
+                      {formattedValue && (
+                        <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {formattedValue}
+                        </span>
                       )}
                     </div>
-                    {accountId && (
-                      <div className="space-y-1">
-                        <Label htmlFor={`portfolio-name-${accountId}`} className="text-xs font-medium text-slate-600">
-                          Portfolio name
-                        </Label>
-                        <Input
-                          id={`portfolio-name-${accountId}`}
-                          value={getPortfolioName(accountId, name)}
-                          onChange={(event) => handlePortfolioNameChange(accountId, event.target.value)}
-                          placeholder="Custom portfolio name"
-                          className="h-8 text-sm"
-                        />
-                        <Label htmlFor={`portfolio-currency-${accountId}`} className="text-xs font-medium text-slate-600">
-                          Base currency
-                        </Label>
-                        {(() => {
-                          const baseValue = getPortfolioBaseCurrency(accountId, fallbackCurrency)
-                          const options = BASE_CURRENCY_OPTIONS.includes(baseValue)
-                            ? BASE_CURRENCY_OPTIONS
-                            : [baseValue, ...BASE_CURRENCY_OPTIONS]
-                          return (
-                            <select
-                              id={`portfolio-currency-${accountId}`}
-                              className="h-8 w-full rounded-md border border-slate-300 bg-white px-2 text-sm"
-                              value={baseValue}
-                              onChange={(event) => handleBaseCurrencyChange(accountId, event.target.value)}
-                            >
-                              {options.map((option) => (
-                                <option key={`${accountId}-${option}`} value={option}>
-                                  {option}
-                                </option>
-                              ))}
-                            </select>
-                          )
-                        })()}
-                      </div>
+                    {account.account?.type && (
+                      <p className="text-xs uppercase tracking-wide text-slate-500">{account.account.type}</p>
                     )}
                   </div>
                   {positions.length === 0 ? (
@@ -554,8 +577,7 @@ export function SnaptradeConnectCard() {
                           {positions.map((position, positionIdx) => {
                             const ticker =
                               position.symbol?.symbol?.raw_symbol ??
-                              position.symbol?.symbol?.symbol ??
-                              "—"
+                              ""
                             const description = position.symbol?.symbol?.description ?? ""
                             return (
                               <tr key={`${ticker}-${positionIdx}`} className="border-t border-slate-100">
@@ -565,9 +587,9 @@ export function SnaptradeConnectCard() {
                                     <span className="block text-xs text-slate-500">{description}</span>
                                   )}
                                 </td>
-                                <td className="py-2 pr-4">{position.units ?? "—"}</td>
+                                <td className="py-2 pr-4">{position.units ?? ""}</td>
                                 <td className="py-2 pr-4">
-                                  {typeof position.price === "number" ? `$${position.price.toFixed(2)}` : "—"}
+                                  {typeof position.price === "number" ? `$${position.price.toFixed(2)}` : ""}
                                 </td>
                               </tr>
                             )

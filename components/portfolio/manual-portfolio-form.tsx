@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { LoadingButton } from "@/components/ui/loading-button"
@@ -27,8 +27,27 @@ export function ManualPortfolioForm() {
   const [holdings, setHoldings] = useState<Holding[]>([{ id: "1", ticker: "", weight: 0 }])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [showMinimalInfoPrompt, setShowMinimalInfoPrompt] = useState(false)
+  const [hasAcknowledgedMinimalInfo, setHasAcknowledgedMinimalInfo] = useState(false)
 
   const router = useRouter()
+
+  const holdingsWithTickers = holdings.filter((holding) => holding.ticker.trim().length > 0)
+  const hasAnyTickers = holdingsWithTickers.length > 0
+  const hasAdditionalHoldingDetails = holdingsWithTickers.some(
+    (holding) =>
+      holding.weight > 0 ||
+      (holding.shares ?? 0) > 0 ||
+      (holding.purchasePrice ?? 0) > 0,
+  )
+  const shouldWarnMinimalInfo = hasAnyTickers && !hasAdditionalHoldingDetails
+
+  useEffect(() => {
+    if (!shouldWarnMinimalInfo) {
+      setShowMinimalInfoPrompt(false)
+      setHasAcknowledgedMinimalInfo(false)
+    }
+  }, [shouldWarnMinimalInfo])
 
   const addHolding = () => {
     const newHolding: Holding = {
@@ -59,38 +78,37 @@ export function ManualPortfolioForm() {
       return false
     }
 
-    const validHoldings = holdings.filter((h) => h.ticker.trim() && h.weight > 0)
+    const validHoldings = holdings.filter((h) => h.ticker.trim())
     if (validHoldings.length === 0) {
-      setError("At least one holding with ticker and weight is required")
+      setError("Add at least one ticker symbol to continue")
       return false
     }
 
-    const totalWeight = getTotalWeight()
-    if (Math.abs(totalWeight - 1) > 0.01 && Math.abs(totalWeight - 100) > 1) {
-      setError("Total weights should sum to 1 (100%).")
-      return false
-    }
-
-    // Check for duplicate tickers
-    const tickers = validHoldings.map((h) => h.ticker.toUpperCase())
+    const tickers = validHoldings.map((h) => h.ticker.trim().toUpperCase())
     const uniqueTickers = new Set(tickers)
     if (tickers.length !== uniqueTickers.size) {
       setError("Duplicate tickers found. Each ticker should appear only once.")
       return false
     }
 
+    const hasWeights = validHoldings.some((h) => h.weight > 0)
+    if (hasWeights) {
+      const totalWeight = getTotalWeight()
+      const weightsAreBalanced = Math.abs(totalWeight - 1) < 0.01 || Math.abs(totalWeight - 100) < 1
+      if (!weightsAreBalanced) {
+        setError("When weights are provided they should total 100%. Use Normalize to auto-adjust.")
+        return false
+      }
+    }
+
     return true
   }
 
-  const handleSubmit = async () => {
-    setError(null)
-
-    if (!validateForm()) return
-
+  const submitPortfolio = async () => {
     setIsLoading(true)
 
     try {
-      const validHoldings = holdings.filter((h) => h.ticker.trim() && h.weight > 0)
+      const validHoldings = holdings.filter((h) => h.ticker.trim())
       const totalWeight = getTotalWeight()
 
       const response = await fetch(
@@ -101,12 +119,18 @@ export function ManualPortfolioForm() {
           body: JSON.stringify({
             name: portfolioName.trim(),
             description: portfolioDescription.trim() || undefined,
-            holdings: validHoldings.map((holding) => ({
-              ticker: holding.ticker.toUpperCase().trim(),
-              weight: totalWeight > 50 ? holding.weight / 100 : holding.weight,
-              shares: holding.shares ?? null,
-              purchasePrice: holding.purchasePrice ?? null,
-            })),
+            holdings: validHoldings.map((holding) => {
+              const hasWeight = holding.weight > 0
+              const normalizedWeight =
+                hasWeight && totalWeight > 50 ? holding.weight / 100 : holding.weight
+
+              return {
+                ticker: holding.ticker.toUpperCase().trim(),
+                weight: hasWeight ? normalizedWeight : undefined,
+                shares: holding.shares ?? null,
+                purchasePrice: holding.purchasePrice ?? null,
+              }
+            }),
           }),
         }),
       )
@@ -124,15 +148,38 @@ export function ManualPortfolioForm() {
     }
   }
 
+  const handleSubmit = async () => {
+    setError(null)
+
+    if (!validateForm()) return
+
+    if (shouldWarnMinimalInfo && !hasAcknowledgedMinimalInfo) {
+      setShowMinimalInfoPrompt(true)
+      return
+    }
+
+    await submitPortfolio()
+  }
+
+  const handleMinimalInfoContinue = async () => {
+    setShowMinimalInfoPrompt(false)
+    setHasAcknowledgedMinimalInfo(true)
+    await handleSubmit()
+  }
+
   const totalWeight = getTotalWeight()
-  const isWeightValid = Math.abs(totalWeight - 1) < 0.01 || Math.abs(totalWeight - 100) < 1
+  const hasAnyWeightInputs = holdings.some((holding) => holding.weight > 0)
+  const isWeightValid =
+    !hasAnyWeightInputs || Math.abs(totalWeight - 1) < 0.01 || Math.abs(totalWeight - 100) < 1
+  const displayTotalWeight =
+    hasAnyWeightInputs && totalWeight <= 1 ? totalWeight * 100 : totalWeight
 
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader>
           <CardTitle>Portfolio Details</CardTitle>
-          <CardDescription>Enter basic information about your portfolio</CardDescription>
+          <CardDescription>Enter basic information about your portfolio. Weights are optional but help improve analytics.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
@@ -189,7 +236,10 @@ export function ManualPortfolioForm() {
                 </div>
 
                 <div className="col-span-2">
-                  <Label htmlFor={`weight-${holding.id}`}>Weight (%)</Label>
+                  <Label htmlFor={`weight-${holding.id}`} className="flex items-center justify-between gap-2">
+                    <span>Weight (%)</span>
+                    <span className="text-xs font-normal text-slate-500 dark:text-slate-400">Optional</span>
+                  </Label>
                   <Input
                     id={`weight-${holding.id}`}
                     type="number"
@@ -247,22 +297,32 @@ export function ManualPortfolioForm() {
             ))}
 
             <div className="flex justify-between items-center p-4 bg-slate-50 dark:bg-slate-800 rounded-lg">
-              <span className="font-medium">Total Weight:</span>
+              <span className="font-medium">
+                Total Weight <span className="ml-1 text-sm font-normal text-slate-500 dark:text-slate-400">(optional)</span>
+              </span>
               <span
-                className={`font-bold ${isWeightValid ? "text-green-600 dark:text-green-400" : "text-red-600 dark:text-red-400"}`}
+                className={`font-bold ${
+                  !hasAnyWeightInputs
+                    ? "text-slate-500 dark:text-slate-300"
+                    : isWeightValid
+                    ? "text-green-600 dark:text-green-400"
+                    : "text-red-600 dark:text-red-400"
+                }`}
               >
-                {totalWeight.toFixed(2)}%
+                {displayTotalWeight.toFixed(2)}%
               </span>
             </div>
 
-            {!isWeightValid && totalWeight > 0 && (
+            {!isWeightValid && hasAnyWeightInputs && (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
-              <AlertDescription>
-                  Total weight should equal 100%. Current total: {totalWeight.toFixed(2)}%
-              </AlertDescription>
-            </Alert>
-          )}
+                <AlertDescription>
+                  Weights are optional, but when you provide them they should total 100%. Current total:{" "}
+                  {displayTotalWeight.toFixed(2)}%
+                  {displayTotalWeight > 100 && " (Use the Normalize button to auto-adjust)"}
+                </AlertDescription>
+              </Alert>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -271,6 +331,26 @@ export function ManualPortfolioForm() {
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {showMinimalInfoPrompt && (
+        <Alert className="border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-900/50 dark:bg-amber-900/10 dark:text-amber-100">
+          <AlertCircle className="h-4 w-4" />
+          <div className="flex flex-col gap-3">
+            <AlertDescription>
+              We recommend adding weights, share counts, or purchase prices so your analysis is more accurate.
+              You can still continue with only tickers if you want.
+            </AlertDescription>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => setShowMinimalInfoPrompt(false)}>
+                I&apos;ll add details
+              </Button>
+              <Button size="sm" onClick={handleMinimalInfoContinue}>
+                Continue anyway
+              </Button>
+            </div>
+          </div>
         </Alert>
       )}
 
@@ -283,7 +363,7 @@ export function ManualPortfolioForm() {
           loading={isLoading}
           loadingText="Creating portfolio..."
           spinnerPlacement="start"
-          disabled={!portfolioName.trim() || totalWeight === 0}
+          disabled={!portfolioName.trim() || !hasAnyTickers}
         >
           Create Portfolio
         </LoadingButton>

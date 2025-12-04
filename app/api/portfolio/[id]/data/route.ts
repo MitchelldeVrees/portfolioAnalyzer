@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchQuotesBatch, fetchHistoryMonthlyClose, fetchFxRate } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
-import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
+import { ensureSectors, sectorForTicker, seedSectorFromQuote } from "@/lib/sector-classifier";
 
 // --- types ---
 type Holding = {
@@ -75,6 +75,8 @@ const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "S
 const QUARTER_LABELS = ["Q1", "Q2", "Q3", "Q4"];
 const MAX_DIVIDEND_TICKERS = 20;
 const DIVIDEND_FETCH_CONCURRENCY = 3;
+const BENCHMARK_SECTOR_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const benchmarkSectorCache = new Map<string, { weights: Record<string, number>; expiresAt: number }>();
 
 // ---------- utils & helpers ----------
 function clamp(x: number, lo: number, hi: number) {
@@ -124,6 +126,12 @@ function standardizeSectorName(raw: string): string {
 }
 
 async function fetchBenchmarkSectorTargets(benchmark: string): Promise<Record<string, number> | null> {
+  const cacheKey = resolveBenchmarkProxy(benchmark).toUpperCase();
+  const cached = benchmarkSectorCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.weights;
+  }
+
   try {
     const proxy = resolveBenchmarkProxy(benchmark);
     const qs: any = await yahooFinance.quoteSummary(proxy, { modules: ["topHoldings", "fundProfile"] });
@@ -228,6 +236,7 @@ async function fetchBenchmarkSectorTargets(benchmark: string): Promise<Record<st
       out[k] = Number(((out[k] / denom) * 100).toFixed(1));
     }
 
+    benchmarkSectorCache.set(cacheKey, { weights: out, expiresAt: Date.now() + BENCHMARK_SECTOR_CACHE_TTL_MS });
     return out;
   } catch (e) {
     console.warn("[benchmark sectors] failed:", (e as Error)?.message || e);

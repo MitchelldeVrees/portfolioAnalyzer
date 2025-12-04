@@ -10,6 +10,8 @@ import { Progress } from "@/components/ui/progress"
 import { RefreshCcw } from "lucide-react"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
+const RESEARCH_DISABLED = (process.env.NEXT_PUBLIC_DISABLE_PORTFOLIO_RESEARCH ?? "1") !== "0"
+
 type ResearchResponse = {
   result: string
   tickers: string[]
@@ -42,6 +44,24 @@ type PortfolioResearchProps = {
 type InsightEntry = ResearchResponse["insights"] extends Array<infer T> ? T : never
 
 export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
+  if (RESEARCH_DISABLED) {
+    return (
+      <Card className="relative overflow-hidden border-dashed border-slate-300 dark:border-slate-700">
+        <div className="absolute inset-0 bg-slate-900/70 backdrop-blur flex items-center justify-center px-6 text-center">
+          <div className="space-y-2">
+            <p className="text-lg font-semibold text-white">We are still working on this segment.</p>
+            <p className="text-sm text-slate-200">
+              The AI research experience is paused across all environments while we finalize improvements.
+            </p>
+          </div>
+        </div>
+        <CardHeader>
+          <CardTitle>AI Research</CardTitle>
+          <CardDescription>Experimental research insights will appear here once this feature returns.</CardDescription>
+        </CardHeader>
+      </Card>
+    )
+  }
   const [data, setData] = useState<ResearchResponse | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)

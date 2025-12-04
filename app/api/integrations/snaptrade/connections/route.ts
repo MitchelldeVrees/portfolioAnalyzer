@@ -4,6 +4,8 @@ import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supa
 import { assertSnaptradeConfigured, getSnaptradeClient } from "@/lib/snaptrade/client"
 import { ensureSnaptradeCredentials } from "@/lib/snaptrade/server"
 import type { CookieMutation } from "@/lib/api/supabase-route"
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(request: NextRequest) {
   let cookieMutations: CookieMutation[] = []
@@ -33,7 +35,7 @@ export async function GET(request: NextRequest) {
       userSecret: snaptradeUserSecret,
     })
 
-    const connections = (Array.isArray(data) ? data : []).map((auth) => ({
+    const parsedConnections = (Array.isArray(data) ? data : []).map((auth) => ({
       id: auth.id ?? "",
       createdAt: auth.created_date ?? null,
       type: auth.type ?? "read",
@@ -47,7 +49,17 @@ export async function GET(request: NextRequest) {
         : null,
     }))
 
-    return applyCookieMutations(NextResponse.json({ ok: true, connections }, { status: 200 }), cookieMutations)
+    const pendingAuthorization = parsedConnections.find((connection) => connection.disabled)
+    const pendingBroker = pendingAuthorization?.brokerage?.name ?? pendingAuthorization?.brokerage?.slug ?? null
+    const pendingMessage = pendingAuthorization
+      ? "This broker requires up to 24 hours for trading credentials to propagate. We'll start syncing once the institution confirms your access."
+      : null
+    const connections = parsedConnections.filter((connection) => !connection.disabled)
+
+    return applyCookieMutations(
+      NextResponse.json({ ok: true, connections, pendingBroker, pendingMessage }, { status: 200 }),
+      cookieMutations,
+    )
   } catch (error) {
     console.error("[snaptrade] failed to list connections", error)
     const message = error instanceof Error ? error.message : "Unable to load connections"

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import type { User } from "@supabase/supabase-js"
+import { CheckCircle2, XCircle } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -36,6 +37,7 @@ export function ProfileSettings({ user, portfolios }: ProfileSettingsProps) {
   const [confirmPassword, setConfirmPassword] = useState("")
   const [selectedPortfolio, setSelectedPortfolio] = useState<string>("")
   const [busy, setBusy] = useState<BusyAction>(null)
+  const [passwordUpdated, setPasswordUpdated] = useState(false)
 
   const portfolioOptions = useMemo(
     () => portfolios.map((portfolio) => ({ ...portfolio, label: portfolio.name || "Untitled portfolio" })),
@@ -48,14 +50,44 @@ export function ProfileSettings({ user, portfolios }: ProfileSettingsProps) {
     }
   }, [portfolioOptions, selectedPortfolio])
 
+  const passwordRequirements = useMemo(
+    () => [
+      { key: "length", label: "At least 12 characters", valid: newPassword.length >= 12 },
+      { key: "upper", label: "Contains an uppercase letter", valid: /[A-Z]/.test(newPassword) },
+      { key: "lower", label: "Contains a lowercase letter", valid: /[a-z]/.test(newPassword) },
+      { key: "digit", label: "Contains a number", valid: /\d/.test(newPassword) },
+      { key: "symbol", label: "Contains a symbol", valid: /[^A-Za-z0-9]/.test(newPassword) },
+    ],
+    [newPassword],
+  )
+
+  const passwordsMatch = confirmPassword.length > 0 && newPassword === confirmPassword
+  const isPasswordStrong = passwordRequirements.every((req) => req.valid)
+  const canSubmitPassword =
+    isPasswordStrong && passwordsMatch && newPassword.length > 0 && confirmPassword.length > 0 && busy !== "password"
+
+  useEffect(() => {
+    if (!passwordUpdated) return
+    if (newPassword.length === 0 && confirmPassword.length === 0) return
+    setPasswordUpdated(false)
+  }, [newPassword, confirmPassword, passwordUpdated])
+
   const handlePasswordChange = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (newPassword.length < 8) {
-      toast({ title: "Password too short", description: "Use at least 8 characters.", variant: "destructive" })
+    if (!isPasswordStrong) {
+      toast({
+        title: "Password too weak",
+        description: "Make sure your password meets all listed requirements.",
+        variant: "destructive",
+      })
       return
     }
-    if (newPassword !== confirmPassword) {
-      toast({ title: "Passwords do not match", description: "Check both fields and try again.", variant: "destructive" })
+    if (!passwordsMatch) {
+      toast({
+        title: "Passwords do not match",
+        description: "Check both fields and try again.",
+        variant: "destructive",
+      })
       return
     }
     setBusy("password")
@@ -75,6 +107,7 @@ export function ProfileSettings({ user, portfolios }: ProfileSettingsProps) {
       setNewPassword("")
       setConfirmPassword("")
       toast({ title: "Password updated", description: "Your password was changed successfully." })
+      setPasswordUpdated(true)
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to change password"
       toast({ title: "Password update failed", description: message, variant: "destructive" })
@@ -180,34 +213,69 @@ export function ProfileSettings({ user, portfolios }: ProfileSettingsProps) {
             <div className="grid gap-2">
               <Label htmlFor="new-password">New password</Label>
               <Input
-                id="new-password"
-                type="password"
-                value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
-                minLength={8}
-                required
-                placeholder="Enter a strong password"
-              />
-            </div>
-            <div className="grid gap-2">
+            id="new-password"
+            type="password"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+            minLength={12}
+            required
+            placeholder="Enter a strong password"
+          />
+        </div>
+        <div className="grid gap-2">
               <Label htmlFor="confirm-password">Confirm password</Label>
               <Input
-                id="confirm-password"
-                type="password"
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-                minLength={8}
-                required
-                placeholder="Re-enter your new password"
-              />
+            id="confirm-password"
+            type="password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            minLength={12}
+            required
+            placeholder="Re-enter your new password"
+          />
+        </div>
+        <div className="space-y-2 text-sm">
+          {passwordRequirements.map((requirement) => (
+            <div
+              key={requirement.key}
+              className={`flex items-center gap-2 ${
+                requirement.valid ? "text-green-600" : "text-slate-500 dark:text-slate-400"
+              }`}
+            >
+              {requirement.valid ? (
+                <CheckCircle2 className="h-4 w-4 text-green-500" />
+              ) : (
+                <XCircle className="h-4 w-4 text-slate-400" />
+              )}
+              <span>{requirement.label}</span>
             </div>
-            <div className="flex justify-end">
-              <Button type="submit" disabled={busy === "password"}>
-                {busy === "password" ? "Updating..." : "Update password"}
-              </Button>
+          ))}
+          <div
+            className={`flex items-center gap-2 ${
+              passwordsMatch ? "text-green-600" : "text-slate-500 dark:text-slate-400"
+            }`}
+          >
+            {passwordsMatch ? (
+              <CheckCircle2 className="h-4 w-4 text-green-500" />
+            ) : (
+              <XCircle className="h-4 w-4 text-slate-400" />
+            )}
+            <span>Passwords match</span>
+          </div>
+        </div>
+        <div className="flex justify-between items-center">
+          {passwordUpdated && (
+            <div className="flex items-center gap-2 text-sm text-green-600">
+              <CheckCircle2 className="h-4 w-4" />
+              Password updated successfully
             </div>
-          </form>
-        </CardContent>
+          )}
+          <Button type="submit" disabled={!canSubmitPassword}>
+            {busy === "password" ? "Updating..." : "Update password"}
+          </Button>
+        </div>
+      </form>
+    </CardContent>
       </Card>
 
       <Card>

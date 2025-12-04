@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button"
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Plus, Edit3, BarChart3, Link as LinkIcon } from "lucide-react"
 import Link from "next/link"
-import { formatDistanceToNow } from "date-fns"
 
 interface Portfolio {
   id: string
@@ -62,9 +61,6 @@ export function PortfolioList({ portfolios }: PortfolioListProps) {
                       {portfolio.description && (
                         <CardDescription className="mt-1">{portfolio.description}</CardDescription>
                       )}
-                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
-                        Created {formatDistanceToNow(new Date(portfolio.created_at), { addSuffix: true })}
-                      </p>
                     </div>
                     <div className="flex space-x-2">
                       <Button variant="outline" size="sm" asChild>

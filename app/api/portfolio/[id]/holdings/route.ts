@@ -3,7 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { fetchQuotesBatch, fetchHistoryMonthlyClose, fetchFxRate } from "@/lib/market-data";
 import yahooFinance from "yahoo-finance2";
-import { ensureSectors, sectorForTicker } from "@/lib/sector-classifier";
+import { ensureSectors, sectorForTicker, seedSectorFromQuote } from "@/lib/sector-classifier";
 
 type Holding = {
   id: string;
