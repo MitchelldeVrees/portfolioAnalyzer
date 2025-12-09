@@ -76,7 +76,10 @@ export async function updateSession(request: NextRequest) {
 
   if (!isSafeMethod) {
     const headerToken = request.headers.get(CSRF_HEADER_NAME)
-    if (!headerToken || headerToken !== csrfToken) {
+    // If we generated a brand-new CSRF token for this request (no cookie yet), accept once and set the cookie.
+    const shouldSkipCheck = csrfNeedsSet && !headerToken
+
+    if (!shouldSkipCheck && (!headerToken || headerToken !== csrfToken)) {
       const forbidden = NextResponse.json({ error: "Invalid CSRF token" }, { status: 403 })
       forbidden.cookies.set(CSRF_COOKIE_NAME, csrfToken, CSRF_COOKIE_OPTIONS)
       return forbidden

@@ -27,23 +27,43 @@ function Swatch({ color }: { color: string }) {
 export function AllocationChart({ data }: AllocationChartProps) {
   // Filter out ~0% to avoid noisy legend items
   const visible = (data ?? []).filter((d) => (d.allocation ?? 0) > 0.05)
+  const RAD = Math.PI / 180
+
+  const renderLabel = (entry: any) => {
+    const radius = entry.innerRadius + (entry.outerRadius - entry.innerRadius) * 1.2
+    const x = entry.cx + radius * Math.cos(-entry.midAngle * RAD)
+    const y = entry.cy + radius * Math.sin(-entry.midAngle * RAD)
+
+    return (
+      <text
+        x={x}
+        y={y}
+        fill="currentColor"
+        textAnchor={x > entry.cx ? "start" : "end"}
+        dominantBaseline="central"
+        className="text-xs"
+      >
+        {`${entry.sector ?? entry.name}: ${Number(entry.allocation ?? entry.value).toFixed(1)}%`}
+      </text>
+    )
+  }
 
   return (
-    <div className="h-full w-full flex flex-col">
+    <div className="h-full w-full flex flex-col text-slate-800 dark:text-slate-200">
       {/* Chart area takes the available vertical space, with a little top padding so labels don't clip */}
-      <div className="flex-1 min-h-[160px] pt-2 px-2">
+      <div className="flex-1 min-h-[200px] pt-2 px-2">
         <ResponsiveContainer width="100%" height="100%">
-          <PieChart>
+          <PieChart margin={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Pie
               data={visible}
               // Leave some room for the legend below by moving the pie slightly up
-              cx="50%%"
-              cy="45%"
+              cx="50%"
+              cy="50%"
               innerRadius="45%"
-              outerRadius="80%"
+              outerRadius="70%"
               dataKey="allocation"
-              // Keep labels tidy; they render inside the donut
-              label={(entry: any) => `${entry.sector ?? entry.name}: ${Number(entry.allocation ?? entry.value).toFixed(1)}%`}
+              // Keep labels outside the donut to avoid clipping
+              label={renderLabel}
               labelLine={false}
               isAnimationActive
             >
@@ -76,4 +96,3 @@ export function AllocationChart({ data }: AllocationChartProps) {
     </div>
   )
 }
-
