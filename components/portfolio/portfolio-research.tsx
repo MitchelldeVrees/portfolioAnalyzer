@@ -12,7 +12,7 @@ import { withCsrfHeaders } from "@/lib/security/csrf-client"
 
 const RESEARCH_DISABLED = (process.env.NEXT_PUBLIC_DISABLE_PORTFOLIO_RESEARCH ?? "1") !== "0"
 
-type ResearchResponse = {
+export type ResearchResponse = {
   result: string
   tickers: string[]
   generatedAt?: string | null
@@ -39,12 +39,22 @@ type ResearchResponse = {
 
 type PortfolioResearchProps = {
   portfolioId: string
+  initialData?: ResearchResponse | null
+  disableFetch?: boolean
+  forceEnabled?: boolean
 }
 
 type InsightEntry = ResearchResponse["insights"] extends Array<infer T> ? T : never
 
-export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
-  if (RESEARCH_DISABLED) {
+export function PortfolioResearch({
+  portfolioId,
+  initialData = null,
+  disableFetch = false,
+  forceEnabled = false,
+}: PortfolioResearchProps) {
+  const researchDisabled = !forceEnabled && RESEARCH_DISABLED
+
+  if (researchDisabled) {
     return (
       <Card className="relative overflow-hidden border-dashed border-slate-300 dark:border-slate-700">
         <div className="absolute inset-0 bg-slate-900/70 backdrop-blur flex items-center justify-center px-6 text-center">
@@ -62,8 +72,8 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
       </Card>
     )
   }
-  const [data, setData] = useState<ResearchResponse | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  const [data, setData] = useState<ResearchResponse | null>(initialData)
+  const [isLoading, setIsLoading] = useState(!initialData && !disableFetch)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [progressTotal, setProgressTotal] = useState(0)
@@ -71,11 +81,18 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
 
   const loadResearch = useCallback(
     async (opts?: { force?: boolean }) => {
+      if (disableFetch) {
+        setIsLoading(false)
+        return
+      }
       try {
         setError(null)
         if (opts?.force) {
           setIsRefreshing(true)
-          setProgressTotal(data?.tickers?.length ?? progressTotal)
+          // If we already know how many tickers were analysed previously, use that
+          // as an estimate for the new run so the progress UI is not stuck at 0.
+          const estimatedTotal = data?.meta?.tickerCount ?? data?.tickers?.length ?? progressTotal
+          setProgressTotal(estimatedTotal || 0)
           setProgressCount(0)
         } else {
           setIsLoading(true)
@@ -96,7 +113,7 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
         }
         const json = (await res.json()) as ResearchResponse
         setData(json)
-        const total = json?.tickers?.length ?? json?.stories?.length ?? 0
+        const total = json?.meta?.tickerCount ?? json?.tickers?.length ?? json?.stories?.length ?? 0
         setProgressTotal(total)
         setProgressCount(total === 0 ? 0 : 0)
       } catch (err) {
@@ -109,14 +126,18 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
         setIsRefreshing(false)
       }
     },
-    [portfolioId, data?.tickers?.length, progressTotal],
+    [portfolioId, data?.tickers?.length, progressTotal, disableFetch],
   )
 
   useEffect(() => {
+    if (disableFetch) {
+      setIsLoading(false)
+      return
+    }
     loadResearch().catch(() => {
       // handled in loadResearch
     })
-  }, [loadResearch])
+  }, [loadResearch, disableFetch])
 
   useEffect(() => {
     if (!data) return
@@ -185,21 +206,19 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
   const warningText = data?.warning ?? (typeof data?.meta?.status === "string" ? data.meta.status : null)
   const visibleStories = useMemo(() => {
     if (!stories.length) return []
+    if (disableFetch) return stories
     if (progressCount <= 0) {
       return isRefreshing ? [] : stories
     }
     return stories.slice(0, Math.min(progressCount, stories.length))
-  }, [stories, progressCount, isRefreshing])
+  }, [stories, progressCount, isRefreshing, disableFetch])
 
   return (
     <Card>
       <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <CardTitle>AI Research Highlights</CardTitle>
-          <CardDescription>
-            Combines Alpha Vantage fundamentals, recent news, and an OpenAI summary. Refresh pulls new market data and
-            regenerates the narrative.
-          </CardDescription>
+          
         </div>
         <div className="flex items-center gap-3">
           {generatedAt && (
@@ -211,7 +230,7 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
             variant="outline"
             size="sm"
             onClick={() => loadResearch({ force: true })}
-            disabled={isRefreshing || isLoading}
+            disabled={isRefreshing || isLoading || disableFetch}
           >
             {isRefreshing ? (
               <>
@@ -233,10 +252,16 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
           </div>
         )}
 
-        {!error && warningText && (
-          <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-200">
-            <div className="font-medium">Latest notice</div>
-            <p className="mt-1">{warningText}</p>
+       
+
+        {tickers.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+            <span className="uppercase tracking-wide text-[10px] text-slate-400">Tickers</span>
+            {tickers.map((tkr) => (
+              <Badge key={tkr} variant="secondary" className="font-semibold">
+                {tkr}
+              </Badge>
+            ))}
           </div>
         )}
 
@@ -253,7 +278,7 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
           </div>
         )}
 
-        {(isRefreshing || progressTotal > 0) && (
+        {!disableFetch && (isRefreshing || progressTotal > 0) && (
           <div className="space-y-2 rounded-xl border border-slate-200/70 bg-slate-50/60 p-4 dark:border-slate-800/60 dark:bg-slate-900/40">
             <div className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
               <span>Research progress</span>
@@ -272,7 +297,6 @@ export function PortfolioResearch({ portfolioId }: PortfolioResearchProps) {
         {visibleStories.length > 0 && (
           <>
             <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
-              {modelName && <span>Model: {modelName}</span>}
               {typeof lookbackDays === "number" && <span>Lookback: {lookbackDays}d</span>}
               <span>Tickers analysed: {data?.meta?.tickerCount ?? tickers.length}</span>
               {generatedAt && <span>Generated {formatDistanceToNow(generatedAt, { addSuffix: true })}</span>}
@@ -301,16 +325,30 @@ type TickerStoryCardProps = {
 }
 
 function ResearchTickerCard({ story, insight }: TickerStoryCardProps) {
-  const sector = insight?.overview?.Sector ?? insight?.overview?.Industry ?? "—"
-  const marketCap = formatMarketCap(insight?.overview?.MarketCapitalization)
-  const peRatio = insight?.overview?.PERatio ? Number(insight.overview.PERatio).toFixed(1) : "—"
+  const overview = insight?.overview ?? {}
+  const sector =
+    (overview as any)?.Sector ??
+    (overview as any)?.Industry ??
+    (overview as any)?.sector ??
+    (overview as any)?.industry ??
+    (overview as any)?.name ??
+    "-"
+  const marketCap = formatMarketCap(
+    (overview as any)?.MarketCapitalization ?? (overview as any)?.marketCap ?? (overview as any)?.cap,
+  )
+  const peRaw = (overview as any)?.PERatio ?? (overview as any)?.pe ?? (overview as any)?.peRatio
+  const peRatio = typeof peRaw === "number" ? peRaw.toFixed(1) : peRaw ? String(peRaw) : "-"
+  const dividendRaw = (overview as any)?.DividendYield ?? (overview as any)?.dividendYield
   const dividend =
-    insight?.overview?.DividendYield && Number(insight.overview.DividendYield) > 0
-      ? `${(Number(insight.overview.DividendYield) * 100).toFixed(2)}%`
-      : "—"
-  const change1d =
-    typeof insight?.price?.changePercent1d === "number" ? `${insight.price.changePercent1d.toFixed(2)}%` : "—"
-  const news = Array.isArray(insight?.news) ? insight?.news?.slice(0, 2) : []
+    typeof dividendRaw === "number" && dividendRaw > 0 ? `${(dividendRaw * 100).toFixed(2)}%` : "-"
+  const changeVal =
+    typeof insight?.price?.changePercent1d === "number"
+      ? insight.price.changePercent1d
+      : typeof (insight as any)?.price?.change1d === "number"
+      ? (insight as any).price.change1d
+      : null
+  const change1d = changeVal !== null ? `${changeVal.toFixed(2)}%` : "-"
+  const news = Array.isArray((insight as any)?.news) ? (insight as any).news.slice(0, 2) : []
   const insiders = Array.isArray(insight?.insiders) ? insight.insiders.slice(0, 2) : []
 
   return (
@@ -362,12 +400,12 @@ function ResearchTickerCard({ story, insight }: TickerStoryCardProps) {
               <div className="rounded-lg border border-slate-200/60 p-3 text-xs dark:border-slate-800/60">
                 <div className="flex justify-between">
                   <span className="text-slate-500 dark:text-slate-400">Market Cap</span>
-                  <span className="font-semibold text-slate-800 dark:text-slate-200">{marketCap ?? "—"}</span>
+                  <span className="font-semibold text-slate-800 dark:text-slate-200">{marketCap ?? "-"}</span>
                 </div>
                 <div className="mt-1 flex justify-between">
                   <span className="text-slate-500 dark:text-slate-400">Latest EPS</span>
                   <span className="font-semibold text-slate-800 dark:text-slate-200">
-                    {insight?.earnings?.reportedEPS ?? "—"}
+                    {insight?.earnings?.reportedEPS ?? (insight as any)?.earnings?.eps ?? "-"}
                   </span>
                 </div>
               </div>
@@ -395,9 +433,10 @@ function ResearchTickerCard({ story, insight }: TickerStoryCardProps) {
   )
 }
 
+
 function formatMarketCap(value: unknown) {
   const num = typeof value === "string" ? Number(value) : typeof value === "number" ? value : null
-  if (!num || !Number.isFinite(num)) return "—"
+  if (!num || !Number.isFinite(num)) return "-"
   if (num >= 1e12) return `${(num / 1e12).toFixed(2)}T`
   if (num >= 1e9) return `${(num / 1e9).toFixed(2)}B`
   if (num >= 1e6) return `${(num / 1e6).toFixed(2)}M`

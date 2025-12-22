@@ -1,9 +1,13 @@
 import { type NextRequest, NextResponse } from "next/server"
-import OpenAI from "openai"
 
 import { createServerClient } from "@/lib/supabase/server"
+import {
+  runPortfolioStockSnapshotWorkflow,
+  type PortfolioAgentInput,
+  type StockSnapshot,
+} from "@/lib/agents/portfolio-stock-snapshot-agent"
 
-const MAX_TICKERS = 8
+const MAX_TICKERS = 3
 const MAX_RESEARCH_TICKERS = 3
 const MAX_TRANSCRIPT_CHARS = 2000
 const ALPHA_VANTAGE_API_BASE = "https://www.alphavantage.co/query"
@@ -110,6 +114,11 @@ type TickerInsight = {
 }
 
 type TickerStory = {
+  ticker: string
+  summary: string
+}
+
+type AgentTickerStory = {
   ticker: string
   summary: string
 }
@@ -386,6 +395,182 @@ async function buildTickerInsights(tickers: string[], apiKey: string): Promise<T
   }))
 }
 
+// -------------------------------
+// Agent-based research generation
+// -------------------------------
+function buildPortfolioAgentInput(
+  portfolioName: string,
+  lastUpdatedIso: string,
+  positions: { ticker: string; weight: number }[],
+): PortfolioAgentInput {
+  const cleaned = positions.filter((p) => p.ticker)
+  const rawTotal = cleaned.reduce((sum, p) => sum + (Number.isFinite(p.weight) ? p.weight : 0), 0)
+  const total = rawTotal > 0 ? rawTotal : cleaned.length || 1
+
+  const normalizedPositions = cleaned.map((p) => ({
+    ticker: p.ticker,
+    weight: total > 0 ? p.weight / total : 0,
+  }))
+
+  return {
+    portfolio_name: portfolioName,
+    last_updated: lastUpdatedIso.slice(0, 10),
+    positions: normalizedPositions,
+    total_weight: 1.0,
+  }
+}
+
+function mapSnapshotToTickerInsight(snapshot: StockSnapshot): { story: AgentTickerStory; insight: TickerInsight } {
+  const { ticker, profile, fundamentals, valuation, narrative, sources } = snapshot
+
+  const overview: AlphaOverview = {
+    Name: ticker,
+    Description: profile.description,
+    Sector: profile.sector,
+    Industry: profile.industry,
+    MarketCapitalization: Number.isFinite(valuation.market_cap)
+      ? String(valuation.market_cap)
+      : undefined,
+    PERatio:
+      Number.isFinite(valuation.price) && Number.isFinite(fundamentals.eps) && fundamentals.eps !== 0
+        ? String(valuation.price / fundamentals.eps)
+        : undefined,
+    ForwardPE: undefined,
+    DividendYield: undefined,
+    EPS: Number.isFinite(fundamentals.eps) ? String(fundamentals.eps) : undefined,
+    Beta: undefined,
+  }
+
+  const price: PriceSnapshot = {
+    latestClose: Number.isFinite(valuation.price) ? valuation.price : null,
+    previousClose: null,
+    changePercent1d: null,
+    changePercentLookback: null,
+    lookbackClose: null,
+  }
+
+  const earnings: EarningsSummary = {
+    annualReports: [],
+    quarterlyEarnings: [],
+    fiscalDateEnding: fundamentals.revenue_period || null,
+    reportedEPS: Number.isFinite(fundamentals.eps) ? fundamentals.eps : null,
+    surprisePercent: null,
+    revenue: Number.isFinite(fundamentals.revenue) ? fundamentals.revenue : null,
+  }
+
+  const news: AlphaNewsArticle[] = sources.map((src) => {
+    try {
+      const url = new URL(src)
+      return {
+        title: url.hostname,
+        summary: undefined,
+        url: src,
+        timePublished: undefined,
+        source: url.hostname,
+        sentiment: undefined,
+      }
+    } catch {
+      return {
+        title: src,
+        summary: undefined,
+        url: src,
+        timePublished: undefined,
+        source: undefined,
+        sentiment: undefined,
+      }
+    }
+  })
+
+  const story: AgentTickerStory = {
+    ticker,
+    summary: narrative.summary,
+  }
+
+  const insight: TickerInsight = {
+    ticker,
+    overview,
+    price,
+    news,
+    earnings,
+    earningsCall: null,
+    insiders: [],
+    errors: undefined,
+  }
+
+  return { story, insight }
+}
+
+async function generateAgentResearchSummary(params: {
+  portfolioId: string
+  supabase: any
+}): Promise<{
+  summary: string
+  stories: TickerStory[]
+  insights: TickerInsight[]
+  metadata: { model: string }
+}> {
+  const { portfolioId, supabase } = params
+
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select("name, updated_at, portfolio_holdings ( ticker, weight )")
+    .eq("id", portfolioId)
+    .maybeSingle()
+
+  if (error || !data) {
+    throw new Error("Failed to load portfolio for research")
+  }
+
+  const portfolioName =
+    typeof data.name === "string" && data.name.trim().length > 0 ? data.name.trim() : "Portfolio"
+  const updatedAt = typeof data.updated_at === "string" ? data.updated_at : new Date().toISOString()
+
+  const holdings: { ticker: string; weight: number }[] = Array.isArray(data.portfolio_holdings)
+    ? data.portfolio_holdings
+        .map((row: any) => ({
+          ticker: typeof row?.ticker === "string" ? row.ticker.trim().toUpperCase() : "",
+          weight: typeof row?.weight === "number" ? row.weight : 0,
+        }))
+        .filter((row) => row.ticker)
+    : []
+
+  if (!holdings.length) {
+    throw new Error("No holdings available for research")
+  }
+
+  const sortedHoldings = holdings
+    .slice()
+    .sort((a, b) => (b.weight || 0) - (a.weight || 0))
+    .slice(0, MAX_RESEARCH_TICKERS)
+
+  const agentInput: PortfolioAgentInput = buildPortfolioAgentInput(portfolioName, updatedAt, sortedHoldings)
+
+  const workflowInput = {
+    input_as_text: JSON.stringify(agentInput),
+  }
+
+  const agentResult = await runPortfolioStockSnapshotWorkflow(workflowInput)
+  const snapshots = agentResult.output_parsed
+
+  const stories: TickerStory[] = []
+  const insights: TickerInsight[] = []
+
+  for (const snapshot of snapshots) {
+    const mapped = mapSnapshotToTickerInsight(snapshot)
+    stories.push({ ticker: mapped.story.ticker, summary: mapped.story.summary })
+    insights.push(mapped.insight)
+  }
+
+  const combinedSummary = stories.map((story) => `## ${story.ticker}\n\n${story.summary}`).join("\n\n")
+
+  return {
+    summary: combinedSummary,
+    stories,
+    insights,
+    metadata: { model: "o4-mini" },
+  }
+}
+
 const RESEARCH_SYSTEM_PROMPT = `You are a financial analyst creating investor-friendly summaries.
 You write concise but insightful analyses of public companies based on structured data inputs.`
 
@@ -421,58 +606,10 @@ async function generateResearchSummary(tickers: string[]): Promise<{
   insights: TickerInsight[]
   metadata: { model: string }
 }> {
-  const alphaKey = process.env.ALPHA_VANTAGE_API_KEY
-  if (!alphaKey) {
-    throw new Error("ALPHA_VANTAGE_API_KEY is not configured")
-  }
-  const openAiKey = process.env.OPENAI_API_KEY
-  if (!openAiKey) {
-    throw new Error("OPENAI_API_KEY is not configured")
-  }
-
-  const insights = await buildTickerInsights(tickers, alphaKey)
-  const openai = new OpenAI({ apiKey: openAiKey })
-
-  const stories: TickerStory[] = []
-
-  for (const insight of insights) {
-    const dataPayload = {
-      ticker: insight.ticker,
-      overview: insight.overview,
-      price: insight.price,
-      earnings: insight.earnings,
-      earningsCall: insight.earningsCall,
-      insiders: insight.insiders,
-      news: insight.news,
-      generatedAt: new Date().toISOString(),
-      lookbackDays: LOOKBACK_DAYS,
-    }
-
-    const userPrompt = RESEARCH_USER_TEMPLATE.replace(
-      "{{DATA}}",
-      JSON.stringify(dataPayload, null, 2),
-    )
-
-    const completion = await openai.chat.completions.create({
-      model: DEFAULT_OPENAI_MODEL,
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: RESEARCH_SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-    })
-
-    const text = completion.choices?.[0]?.message?.content?.trim()
-    if (text) {
-      stories.push({ ticker: insight.ticker, summary: text })
-    }
-  }
-
-  const summary = stories.map((story) => `## ${story.ticker}\n\n${story.summary}`).join("\n\n")
   return {
-    summary,
-    stories,
-    insights,
+    summary: "",
+    stories: [],
+    insights: [],
     metadata: { model: DEFAULT_OPENAI_MODEL },
   }
 }
@@ -557,12 +694,16 @@ export async function POST(request: NextRequest, context: { params: { id: string
       return NextResponse.json({ error: "Not found" }, { status: 404 })
     }
 
-    const tickers = await loadHoldingsTickers(supabase, context.params.id, MAX_RESEARCH_TICKERS)
+    const { summary, stories, insights, metadata } = await generateAgentResearchSummary({
+      portfolioId: context.params.id,
+      supabase,
+    })
+
+    const tickers = stories.map((s) => s.ticker)
     if (!tickers.length) {
       return NextResponse.json({ error: "No holdings available for research" }, { status: 400 })
     }
 
-    const { summary, insights, metadata } = await generateResearchSummary(tickers)
     const payload = {
       tickers,
       result: summary,

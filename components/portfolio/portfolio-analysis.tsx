@@ -12,8 +12,8 @@ import Link from "next/link"
 import { formatDistanceToNow } from "date-fns"
 import { AllocationChart } from "./allocation-chart"
 import { HoldingsAnalysis } from "./holdings-analysis"
-import { PortfolioSummaryReport } from "./portfolio-summary-report"
-import { PortfolioResearch } from "./portfolio-research"
+import { PortfolioSummaryReport, type SummaryResp } from "./portfolio-summary-report"
+import { PortfolioResearch, type ResearchResponse } from "./portfolio-research"
 import { useEffect, useState, useRef, useCallback } from "react"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
 import { DividendIncomeCard } from "./dividend-income-card"
@@ -39,6 +39,10 @@ interface PortfolioAnalysisProps {
   initialAnalysis?: any | null
   initialHoldings?: { holdings: any[]; meta: any } | null
   deferInitialLoad?: boolean
+  disableFetch?: boolean
+  initialResearch?: ResearchResponse | null
+  initialSummary?: SummaryResp | null
+  readOnly?: boolean
 }
 
 export function PortfolioAnalysis({
@@ -46,10 +50,14 @@ export function PortfolioAnalysis({
   initialAnalysis = null,
   initialHoldings = null,
   deferInitialLoad = false,
+  disableFetch = false,
+  initialResearch = null,
+  initialSummary = null,
+  readOnly = false,
 }: PortfolioAnalysisProps) {
   const [portfolioData, setPortfolioData] = useState<any>(initialAnalysis)
   const [benchmark, setBenchmark] = useState("^GSPC")
-  const [loading, setLoading] = useState(!initialAnalysis && !deferInitialLoad)
+  const [loading, setLoading] = useState(!initialAnalysis && !deferInitialLoad && !disableFetch)
   const [error, setError] = useState<string | null>(null)
   const [dataRefreshToken, setDataRefreshToken] = useState(0)
   const skipInitialFetchRef = useRef(!!initialAnalysis)
@@ -58,9 +66,14 @@ export function PortfolioAnalysis({
   const [refreshError, setRefreshError] = useState<string | null>(null)
   const dividendData = portfolioData?.dividends
   const showDividendCard = Boolean(dividendData)
+  const readOnlyMode = readOnly || disableFetch
 
   const fetchPortfolioData = useCallback(
     async (silent: boolean) => {
+      if (disableFetch) {
+        setLoading(false)
+        return
+      }
       try {
         if (!silent) setLoading(true)
         setError(null)
@@ -74,10 +87,14 @@ export function PortfolioAnalysis({
         if (!silent) setLoading(false)
       }
     },
-    [benchmark, portfolio.id],
+    [benchmark, portfolio.id, disableFetch],
   )
 
   useEffect(() => {
+    if (disableFetch) {
+      setLoading(false)
+      return
+    }
     const shouldDeferInitialFetch = deferInitialLoad && !initialAnalysis && !hasDataRef.current && dataRefreshToken === 0
     if (shouldDeferInitialFetch) return
 
@@ -93,6 +110,7 @@ export function PortfolioAnalysis({
   }, [portfolioData])
 
   const handleRefreshData = async () => {
+    if (disableFetch || readOnly) return
     setRefreshError(null)
     setRefreshingData(true)
     try {
@@ -126,7 +144,7 @@ export function PortfolioAnalysis({
         throw new Error(message)
       }
 
-      setDataRefreshToken((token) => token + 1)
+        setDataRefreshToken((token) => token + 1)
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to refresh portfolio data"
       setRefreshError(message)
@@ -271,7 +289,7 @@ export function PortfolioAnalysis({
             <Button
               onClick={handleRefreshData}
               variant="default"
-              disabled={refreshingData}
+              disabled={refreshingData || disableFetch || readOnly}
             >
               <RefreshCcw className={`w-4 h-4 mr-2 ${refreshingData ? "animate-spin" : ""}`} />
               {refreshingData ? "Refreshing..." : "Refresh Data"}
@@ -488,15 +506,31 @@ export function PortfolioAnalysis({
         </TabsContent>
 
         <TabsContent value="holdings">
-          <HoldingsAnalysis portfolioId={portfolio.id} benchmark={benchmark} refreshToken={dataRefreshToken} initialData={initialHoldings} />
+          <HoldingsAnalysis
+            portfolioId={portfolio.id}
+            benchmark={benchmark}
+            refreshToken={dataRefreshToken}
+            initialData={initialHoldings}
+            disableFetch={disableFetch}
+          />
         </TabsContent>
 
         <TabsContent value="research">
-          <PortfolioResearch portfolioId={portfolio.id} />
+          <PortfolioResearch
+            portfolioId={portfolio.id}
+            initialData={initialResearch}
+            disableFetch={disableFetch}
+            forceEnabled={readOnlyMode || Boolean(initialResearch)}
+          />
         </TabsContent>
 
         <TabsContent value="report">
-          <PortfolioSummaryReport portfolio={portfolio} benchmark={benchmark} />
+          <PortfolioSummaryReport
+            portfolio={portfolio}
+            benchmark={benchmark}
+            initialSummary={initialSummary}
+            readOnly={readOnlyMode}
+          />
         </TabsContent>
       </Tabs>
       {refreshingData && (
