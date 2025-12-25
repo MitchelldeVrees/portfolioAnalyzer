@@ -50,11 +50,12 @@ interface Portfolio {
 interface PortfolioSummaryReportProps {
   portfolio: Portfolio | null | undefined
     benchmark?: string
-
+  initialSummary?: SummaryResp | null
+  readOnly?: boolean
 }
 
 /** API response from /api/portfolio/[id]/summary */
-type SummaryResp = {
+export type SummaryResp = {
   overall: {
     score: number
     components: Array<{
@@ -85,11 +86,16 @@ interface ReportSection {
   keyMetrics: Array<{ label: string; value: string; trend?: "up" | "down" | "neutral" }>
 }
 
-export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: PortfolioSummaryReportProps) {
+export function PortfolioSummaryReport({
+  portfolio,
+  benchmark = "^GSPC",
+  initialSummary = null,
+  readOnly = false,
+}: PortfolioSummaryReportProps) {
   const [isGenerating, setIsGenerating] = useState(false)
   const [isEmailing, setIsEmailing] = useState(false)
   const [today, setToday] = useState<string>("")
-  const [summary, setSummary] = useState<SummaryResp | null>(null)
+  const [summary, setSummary] = useState<SummaryResp | null>(initialSummary)
   const [error, setError] = useState<string | null>(null)
   const [isScoreBreakdownOpen, setIsScoreBreakdownOpen] = useState(false)
 
@@ -99,6 +105,7 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
 
   // Fetch score + KPIs from new summary route
   useEffect(() => {
+    if (readOnly) return
     let cancelled = false
     async function run() {
       if (!portfolio?.id) return
@@ -116,7 +123,7 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
     return () => {
       cancelled = true
     }
-  }, [portfolio?.id])
+  }, [portfolio?.id, readOnly])
 
   const overallScore = summary?.overall?.score ?? null
   const overallComponents = summary?.overall?.components ?? []
@@ -248,6 +255,7 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
   }
 
   const handleExportPDF = async () => {
+    if (readOnly) return
     if (!portfolio?.id) {
       toast({
         title: "Portfolio unavailable",
@@ -349,6 +357,7 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
   }
 
   const handleEmailReport = async () => {
+    if (readOnly) return
     setIsEmailing(true)
     try {
       const email = prompt("Enter email address to send the report:")
@@ -401,7 +410,7 @@ export function PortfolioSummaryReport({ portfolio,benchmark = "^GSPC"  }: Portf
             </div>
             <div className="flex space-x-2">
               
-              <Button onClick={handleExportPDF} disabled={isGenerating || isEmailing}>
+              <Button onClick={handleExportPDF} disabled={isGenerating || isEmailing || readOnly}>
                 {isGenerating ? (
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                 ) : (

@@ -55,11 +55,18 @@ interface HoldingsAnalysisProps {
   benchmark: string
   refreshToken: number
   initialData?: { holdings: HoldingRow[]; meta: any } | null
+  disableFetch?: boolean
 }
 
-export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initialData = null }: HoldingsAnalysisProps) {
+export function HoldingsAnalysis({
+  portfolioId,
+  benchmark,
+  refreshToken,
+  initialData = null,
+  disableFetch = false,
+}: HoldingsAnalysisProps) {
   const [data, setData] = useState<{ holdings: HoldingRow[]; meta: any } | null>(initialData)
-  const [loading, setLoading] = useState(!initialData)
+  const [loading, setLoading] = useState(!initialData && !disableFetch)
   const [error, setError] = useState<string | null>(null)
   const skipInitialFetchRef = useRef(!!initialData)
   // modal state
@@ -67,6 +74,10 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
   const [selected, setSelected] = useState<HoldingRow | null>(null)
 
   useEffect(() => {
+    if (disableFetch) {
+      setLoading(false)
+      return
+    }
     let cancelled = false
 
     async function run(silent: boolean) {
@@ -98,7 +109,7 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
     return () => {
       cancelled = true
     }
-  }, [portfolioId, benchmark, refreshToken])
+  }, [portfolioId, benchmark, refreshToken, disableFetch])
 
 
   useEffect(() => {
@@ -113,6 +124,7 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
   const baseCurrency = "USD"
 
   const refreshSnapshot = async (force = false) => {
+    if (disableFetch) return
     const url = `/api/portfolio/${portfolioId}/holdings?benchmark=${encodeURIComponent(benchmark)}${force ? "&forceRefresh=true" : ""}`
     const res = await fetch(url)
     if (!res.ok) throw new Error(`Failed to load holdings (${res.status})`)
@@ -247,7 +259,6 @@ export function HoldingsAnalysis({ portfolioId, benchmark, refreshToken, initial
                       <td className="p-3">
                         <div className="flex flex-col gap-1">
                           <div className="font-mono font-medium text-slate-900 dark:text-slate-100">{h.ticker}</div>
-                          <div className="text-xs text-slate-500 dark:text-slate-400">Quote: {h.quoteSymbol ?? h.ticker}</div>
                         </div>
                       </td>
                       <td className="p-3">
