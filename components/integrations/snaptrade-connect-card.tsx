@@ -81,6 +81,8 @@ export function SnaptradeConnectCard() {
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
   const [snaptradeSummary, setSnaptradeSummary] = useState<{ total: number; currency?: string | null } | null>(null)
   const [autoSyncTriggered, setAutoSyncTriggered] = useState(false)
+  const [portfolioNames, setPortfolioNames] = useState<Record<string, string>>({})
+  const [portfolioBaseCurrencies, setPortfolioBaseCurrencies] = useState<Record<string, string>>({})
   const pageSize = 9
 
   const BASE_CURRENCY_OPTIONS = ["USD", "EUR", "GBP", "CAD", "CHF", "SEK", "NOK", "JPY"]
