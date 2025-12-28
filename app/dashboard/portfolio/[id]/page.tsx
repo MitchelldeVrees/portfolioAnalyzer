@@ -21,7 +21,12 @@ export default async function PortfolioPage({ params, searchParams }: PageProps)
   }
 
   const snaptradeDetails = await getSnaptradeHoldingsDetails(supabase, data.user.id)
-  const snaptradeSummary = snaptradeDetails.status === "ok" ? snaptradeDetails.summary : null
+  const snaptradeSummary =
+    snaptradeDetails.status === "ok"
+      ? snaptradeDetails.summaryBase
+        ? { ...snaptradeDetails.summaryBase, currency: snaptradeDetails.baseCurrency ?? snaptradeDetails.summaryBase.currency }
+        : snaptradeDetails.summary
+      : null
 
   // Get portfolio with holdings
   const { data: portfolio, error: portfolioError } = await supabase

@@ -32,8 +32,10 @@ export type OHLCPoint = { date: string; close: number }
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY || ""
 const YF_BASE = "https://query1.finance.yahoo.com"
 const FX_CACHE_TTL_MS = 5 * 60 * 1000
+const ECB_FX_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
 
 const fxCache = new Map<string, { rate: number; fetchedAt: number }>()
+let ecbRatesCache: { rates: Record<string, number>; fetchedAt: number } | null = null
 
 const DEFAULT_HEADERS = {
   "User-Agent": "portfolio-analyzer/1.0",
@@ -475,12 +477,42 @@ export async function fetchFxRate(fromCurrency: string, toCurrency: string): Pro
     return cached.rate
   }
 
-  const pair = `${from}${to}=X`
   try {
-    const quotes = await yahooQuotesBatch([pair])
-    const quote = quotes?.[pair]
-    const rate = quote?.price
-    if (typeof rate === "number" && Number.isFinite(rate) && rate > 0) {
+    if (!ecbRatesCache || now - ecbRatesCache.fetchedAt >= FX_CACHE_TTL_MS) {
+      const response = await fetch(ECB_FX_URL, {
+        headers: { ...DEFAULT_HEADERS, Accept: "application/xml,text/xml,*/*" },
+      })
+      if (!response.ok) {
+        throw new Error(`ECB responded ${response.status}`)
+      }
+      const xml = await response.text()
+      const rates: Record<string, number> = { EUR: 1 }
+      const rateRegex = /currency='([A-Z]{3})'\s+rate='([0-9.]+)'/g
+      let match = rateRegex.exec(xml)
+      while (match) {
+        const code = match[1]
+        const rate = Number(match[2])
+        if (code && Number.isFinite(rate) && rate > 0) {
+          rates[code] = rate
+        }
+        match = rateRegex.exec(xml)
+      }
+      ecbRatesCache = { rates, fetchedAt: now }
+    }
+
+    const rates = ecbRatesCache?.rates ?? { EUR: 1 }
+    const rateFrom = rates[from]
+    const rateTo = rates[to]
+    if (from !== "EUR" && typeof rateFrom !== "number") {
+      throw new Error(`ECB missing rate for ${from}`)
+    }
+    if (to !== "EUR" && typeof rateTo !== "number") {
+      throw new Error(`ECB missing rate for ${to}`)
+    }
+    const normalizedFrom = from === "EUR" ? 1 : rateFrom
+    const normalizedTo = to === "EUR" ? 1 : rateTo
+    const rate = normalizedTo / normalizedFrom
+    if (Number.isFinite(rate) && rate > 0) {
       fxCache.set(key, { rate, fetchedAt: now })
       return rate
     }

@@ -5,7 +5,7 @@ import { fetchQuotesBatch, fetchHistoryMonthlyClose, fetchFxRate } from "@/lib/m
 import yahooFinance from "yahoo-finance2";
 import { ensureSectors, sectorForTicker, seedSectorFromQuote } from "@/lib/sector-classifier";
 
-type Holding = {
+export type Holding = {
   id: string;
   ticker: string;
   weight: number;
@@ -15,7 +15,7 @@ type Holding = {
   quote_symbol?: string | null;
 };
 
-type HoldingsSnapshotPayload = {
+export type HoldingsSnapshotPayload = {
   holdings: Array<{
     id: string;
     ticker: string;
@@ -49,6 +49,12 @@ type HoldingsSnapshotPayload = {
     riskModel: string;
     refreshedAt: string;
     baseCurrency: string;
+  };
+  fxRates?: Record<string, number>;
+  source?: {
+    type: string;
+    accountId?: string | null;
+    provider?: string | null;
   };
 };
 
@@ -377,6 +383,18 @@ async function computeHoldingsSnapshot(
   benchmark: string,
   baseCurrency: string | null,
 ): Promise<HoldingsSnapshotPayload> {
+  console.info("[holdings][snapshot-input]", {
+    count: Array.isArray(holdings) ? holdings.length : 0,
+    sample: (Array.isArray(holdings) ? holdings : []).slice(0, 5).map((h) => ({
+      id: h.id,
+      ticker: h.ticker,
+      quote_symbol: (h as any).quote_symbol ?? h.quote_symbol,
+      currency_code: h.currency_code,
+      shares: h.shares,
+      weight: h.weight,
+    })),
+  });
+
   const normalizedBenchmark = benchmark || DEFAULT_BENCH;
   const normalizedBase = (baseCurrency || "USD").toUpperCase();
   const sanitized = Array.isArray(holdings) ? holdings : [];
@@ -418,6 +436,36 @@ async function computeHoldingsSnapshot(
 
   const quotesMap = (await fetchQuotesBatch(quoteSymbols)) || {};
 
+  // Attempt to rescue prices for symbols that fell through to default (price 100) by using recent history.
+  const fallbackSymbols = Array.from(
+    new Set(
+      augmented
+        .map((h) => h.quoteSymbol)
+        .filter((sym) => {
+          const q = quotesMap[sym];
+          return (
+            !q ||
+            typeof q.price !== "number" ||
+            !Number.isFinite(q.price) ||
+            (q.price === 100 && (q.change ?? 0) === 0 && (q.changePercent ?? 0) === 0)
+          );
+        }),
+    ),
+  );
+
+  for (const sym of fallbackSymbols) {
+    try {
+      const hist = await fetchHistoryMonthlyClose(sym, 1);
+      const lastClose = Array.isArray(hist) && hist.length ? hist[hist.length - 1]?.close : null;
+      if (typeof lastClose === "number" && Number.isFinite(lastClose) && lastClose > 0) {
+        quotesMap[sym] = { price: lastClose, change: 0, changePercent: 0 };
+        console.info("[holdings][quote-fallback-history]", { symbol: sym, price: lastClose });
+      }
+    } catch (e) {
+      console.warn("[holdings][quote-fallback-history-failed]", { symbol: sym, error: (e as Error)?.message ?? e });
+    }
+  }
+
   const uniqueCurrencies = Array.from(
     new Set(
       augmented
@@ -441,7 +489,21 @@ async function computeHoldingsSnapshot(
   };
 
   const temp = augmented.map((h) => {
-    const quote = quotesMap[h.quoteSymbol] || { price: 100 };
+    const quote = quotesMap[h.quoteSymbol] || { price: 100, change: 0, changePercent: 0 };
+    if (!quotesMap[h.quoteSymbol]) {
+      console.warn("[holdings][quote-missing]", { ticker: h.ticker, quoteSymbol: h.quoteSymbol });
+    } else if (
+      typeof quote.price === "number" &&
+      quote.price === 100 &&
+      (quote.change ?? 0) === 0 &&
+      (quote.changePercent ?? 0) === 0
+    ) {
+      console.warn("[holdings][quote-fallback-price]", {
+        ticker: h.ticker,
+        quoteSymbol: h.quoteSymbol,
+        quote,
+      });
+    }
     const rawPrice = typeof quote.price === "number" && Number.isFinite(quote.price) ? quote.price : 100;
     const price = convertAmount(rawPrice, h.currencyCode) ?? rawPrice;
     const sharesRaw =
@@ -603,6 +665,7 @@ async function computeHoldingsSnapshot(
       refreshedAt,
       baseCurrency: normalizedBase,
     },
+    fxRates,
   };
 }
 
@@ -687,3 +750,6 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
+
+// Named exports for reuse in other routes
+export { computeHoldingsSnapshot, persistHoldingsSnapshot };

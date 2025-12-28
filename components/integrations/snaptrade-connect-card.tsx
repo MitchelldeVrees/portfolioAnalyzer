@@ -1,12 +1,23 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { useRouter } from "next/navigation"
 import { withCsrfHeaders } from "@/lib/security/csrf-client"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { LoadingButton } from "@/components/ui/loading-button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 
 type SnaptradeBrokerage = {
   id: string
@@ -20,9 +31,14 @@ type SnaptradeBrokerage = {
 
 type SnaptradePosition = {
   units?: number | null
+  fractional_units?: number | null
   price?: number | null
   average_purchase_price?: number | null
   currency?: { code?: string | null } | string | null
+  price_currency?: string | null
+  fx_to_base?: number | null
+  price_base?: number | null
+  value_base?: number | null
   symbol?: {
     symbol?: {
       symbol?: string
@@ -48,6 +64,19 @@ type SnaptradeAccountHolding = {
       }
     }
   }
+  total_value?: {
+    value?: number | null
+    currency?: string | null
+  }
+  total_value_base?: {
+    value?: number | null
+    currency?: string | null
+  }
+  cash_base?: {
+    value?: number | null
+    currency?: string | null
+  }
+  base_currency?: string | null
   positions?: SnaptradePosition[] | null
 }
 
@@ -64,6 +93,7 @@ type SnaptradeConnection = {
 }
 
 export function SnaptradeConnectCard() {
+  const router = useRouter()
   const [brokerages, setBrokerages] = useState<SnaptradeBrokerage[]>([])
   const [loadingBrokers, setLoadingBrokers] = useState(false)
   const [connectingSlug, setConnectingSlug] = useState<string | null>(null)
@@ -80,9 +110,22 @@ export function SnaptradeConnectCard() {
   const [pendingBroker, setPendingBroker] = useState<string | null>(null)
   const [pendingMessage, setPendingMessage] = useState<string | null>(null)
   const [snaptradeSummary, setSnaptradeSummary] = useState<{ total: number; currency?: string | null } | null>(null)
+  const [snaptradeBaseSummary, setSnaptradeBaseSummary] = useState<{ total: number; currency?: string | null } | null>(
+    null,
+  )
+  const [snaptradeBaseCurrency, setSnaptradeBaseCurrency] = useState("USD")
   const [autoSyncTriggered, setAutoSyncTriggered] = useState(false)
   const [portfolioNames, setPortfolioNames] = useState<Record<string, string>>({})
   const [portfolioBaseCurrencies, setPortfolioBaseCurrencies] = useState<Record<string, string>>({})
+  const [expandedAccounts, setExpandedAccounts] = useState<Record<string, boolean>>({})
+  const [importDialogOpen, setImportDialogOpen] = useState(false)
+  const [importAccountId, setImportAccountId] = useState<string | null>(null)
+  const [importAccountLabel, setImportAccountLabel] = useState<string>("")
+  const [importPortfolioName, setImportPortfolioName] = useState("")
+  const [importPortfolioDescription, setImportPortfolioDescription] = useState("")
+  const [importBaseCurrency, setImportBaseCurrency] = useState("USD")
+  const [importError, setImportError] = useState<string | null>(null)
+  const [importing, setImporting] = useState(false)
   const pageSize = 9
 
   const BASE_CURRENCY_OPTIONS = ["USD", "EUR", "GBP", "CAD", "CHF", "SEK", "NOK", "JPY"]
@@ -155,7 +198,7 @@ export function SnaptradeConnectCard() {
     }
   }
 
-  const fetchHoldings = async () => {
+  const fetchHoldings = async ({ logUserId = false } = {}) => {
     setLoadingHoldings(true)
     try {
       const response = await fetch("/api/integrations/snaptrade/holdings")
@@ -163,8 +206,19 @@ export function SnaptradeConnectCard() {
       if (!response.ok) {
         throw new Error(payload?.error ?? "Unable to load holdings")
       }
+      console.info("[snaptrade] holdings response:", payload)
+      const baseCurrency = (payload?.baseCurrency ?? "USD").toUpperCase()
+      setSnaptradeBaseCurrency(baseCurrency)
+      if (payload?.fxRates && typeof payload.fxRates === "object") {
+        console.info("[snaptrade] fx rates:", payload.fxRates)
+      }
+      if (logUserId) {
+        const snaptradeUserId = payload?.snaptradeUserId ?? null
+        console.info("[snaptrade] holdings user id:", snaptradeUserId)
+      }
       const data = payload?.holdings
       const summary = payload?.summary
+      const summaryBase = payload?.summaryBase
       if (summary && typeof summary.total === "number") {
         setSnaptradeSummary({
           total: summary.total,
@@ -172,6 +226,14 @@ export function SnaptradeConnectCard() {
         })
       } else {
         setSnaptradeSummary(null)
+      }
+      if (summaryBase && typeof summaryBase.total === "number") {
+        setSnaptradeBaseSummary({
+          total: summaryBase.total,
+          currency: summaryBase.currency ?? baseCurrency,
+        })
+      } else {
+        setSnaptradeBaseSummary(null)
       }
       if (Array.isArray(data)) {
         setHoldings(data)
@@ -188,6 +250,7 @@ export function SnaptradeConnectCard() {
       setLastSyncedAt(null)
       setError(err instanceof Error ? err.message : "Failed to load holdings")
       setSnaptradeSummary(null)
+      setSnaptradeBaseSummary(null)
     } finally {
       setLoadingHoldings(false)
     }
@@ -282,16 +345,15 @@ export function SnaptradeConnectCard() {
   }, [brokerages, searchTerm])
 
   const formattedSnaptradeBalance = useMemo(() => {
-    if (!snaptradeSummary || typeof snaptradeSummary.total !== "number") return null
+    const summary = snaptradeBaseSummary ?? snaptradeSummary
+    if (!summary || typeof summary.total !== "number") return null
+    const currency = snaptradeBaseCurrency || summary.currency || "USD"
     try {
-      const currency = snaptradeSummary.currency ?? "USD"
-      return new Intl.NumberFormat(navigator.language, { style: "currency", currency }).format(
-        snaptradeSummary.total,
-      )
+      return new Intl.NumberFormat(navigator.language, { style: "currency", currency }).format(summary.total)
     } catch {
-      return `${snaptradeSummary.total.toFixed(2)}${snaptradeSummary.currency ? ` ${snaptradeSummary.currency}` : ""}`
+      return `${summary.total.toFixed(2)}${currency ? ` ${currency}` : ""}`
     }
-  }, [snaptradeSummary])
+  }, [snaptradeBaseCurrency, snaptradeBaseSummary, snaptradeSummary])
 
   const totalPages = Math.max(1, Math.ceil(filteredBrokerages.length / pageSize))
   const pagedBrokerages = filteredBrokerages.slice((currentPage - 1) * pageSize, currentPage * pageSize)
@@ -349,8 +411,8 @@ export function SnaptradeConnectCard() {
   }
 
   function getPortfolioBaseCurrency(accountId: string | null, fallback?: string | null) {
-    if (!accountId) return fallback ?? "USD"
-    return portfolioBaseCurrencies[accountId] ?? fallback ?? "USD"
+    if (!accountId) return snaptradeBaseCurrency || fallback || "USD"
+    return portfolioBaseCurrencies[accountId] ?? snaptradeBaseCurrency ?? fallback ?? "USD"
   }
 
   const handleBaseCurrencyChange = (accountId: string, value: string) => {
@@ -360,12 +422,61 @@ export function SnaptradeConnectCard() {
     }))
   }
 
+  const openImportModal = (accountId: string | null, label: string) => {
+    setImportAccountId(accountId)
+    setImportAccountLabel(label)
+    setImportPortfolioName(label || "New portfolio")
+    setImportPortfolioDescription("")
+    setImportBaseCurrency(snaptradeBaseCurrency || "USD")
+    setImportError(null)
+    setImportDialogOpen(true)
+  }
+
+  const handleImportSubmit = async () => {
+    if (!importPortfolioName.trim()) {
+      setImportError("Portfolio name is required.")
+      return
+    }
+    setImportError(null)
+    setImporting(true)
+    try {
+      const response = await fetch(
+        "/api/integrations/snaptrade/import",
+        withCsrfHeaders({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            accountId: importAccountId,
+            portfolioName: importPortfolioName.trim(),
+            description: importPortfolioDescription.trim() || undefined,
+            baseCurrency: importBaseCurrency,
+          }),
+        }),
+      )
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to import holdings")
+      }
+      setStatusMessage("Portfolio created from broker holdings.")
+      setImportDialogOpen(false)
+      const portfolioId = payload?.portfolio?.id ?? null
+      if (portfolioId) {
+        router.push(`/dashboard/portfolio/${portfolioId}`)
+      }
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Failed to import holdings")
+    } finally {
+      setImporting(false)
+    }
+  }
+
   return (
-    <Card className="border-slate-200 shadow-sm">
-      <CardHeader className="flex flex-col gap-2">
-        <CardTitle>Connect your broker</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-6">
+    <>
+      <Card className="border-slate-200 shadow-sm">
+        <CardHeader className="flex flex-col gap-2">
+          <CardTitle>Connect your broker</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-6">
         {error && (
           <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
             {error}
@@ -393,7 +504,12 @@ export function SnaptradeConnectCard() {
                 <Button variant="outline" size="sm" onClick={fetchConnections} disabled={loadingConnections}>
                   {loadingConnections ? "Refreshing…" : "Refresh status"}
                 </Button>
-                <LoadingButton variant="secondary" size="sm" loading={loadingHoldings} onClick={fetchHoldings}>
+                <LoadingButton
+                  variant="secondary"
+                  size="sm"
+                  loading={loadingHoldings}
+                  onClick={() => fetchHoldings({ logUserId: true })}
+                >
                   {loadingHoldings ? "Fetching holdings…" : "Fetch holdings"}
                 </LoadingButton>
               </div>
@@ -534,18 +650,40 @@ export function SnaptradeConnectCard() {
                 <span className="text-xs text-slate-500">Synced {lastSyncedAt.toLocaleString()}</span>
               )}
             </div>
+            <p className="text-xs text-slate-500">
+              All values shown in {snaptradeBaseCurrency} (base). Native amounts are shown when they differ.
+            </p>
             {holdings.map((account, idx) => {
               const accountId = resolveAccountId(account.account)
+              const accountKey = accountId ?? `account-${idx}`
               const name =
                 account.account?.name || account.account?.number || `Linked account ${idx + 1}`
-                console.log('account', account);
-              const positions = Array.isArray(account.positions) ? account.positions.slice(0, 5) : []
-              const totalValue = account.total_value.value ?? null
-              const totalCurrency = account.total_value.currency ?? snaptradeSummary?.currency ?? "USD"
+              const isExpanded = expandedAccounts[accountKey] ?? false
+              const allPositions = Array.isArray(account.positions) ? account.positions : []
+              const positions = isExpanded ? allPositions : allPositions.slice(0, 5)
+              const cashAmount = account.account?.balance?.total?.amount ?? null
+              const cashCurrency = normalizeCurrencyCode(account.account?.balance?.total?.currency ?? null)
+              const cashBaseAmount =
+                typeof account?.cash_base?.value === "number" ? (account.cash_base.value as number) : null
+              const totalValueBase =
+                typeof account?.total_value_base?.value === "number" ? (account.total_value_base.value as number) : null
+              const totalValueNative = account.total_value?.value ?? null
+              const totalCurrencyNative =
+                normalizeCurrencyCode(account.total_value?.currency ?? null) ?? snaptradeSummary?.currency ?? null
+              const baseCurrency = snaptradeBaseCurrency || account.base_currency || "USD"
               const formattedValue =
-                typeof totalValue === "number"
-                  ? new Intl.NumberFormat("en-US", { style: "currency", currency: totalCurrency ?? "USD" }).format(
-                      totalValue,
+                typeof totalValueBase === "number"
+                  ? new Intl.NumberFormat("en-US", { style: "currency", currency: baseCurrency }).format(
+                      totalValueBase,
+                    )
+                  : null
+              const formattedValueNative =
+                totalCurrencyNative &&
+                totalCurrencyNative !== baseCurrency &&
+                typeof totalValueNative === "number" &&
+                Number.isFinite(totalValueNative)
+                  ? new Intl.NumberFormat("en-US", { style: "currency", currency: totalCurrencyNative }).format(
+                      totalValueNative,
                     )
                   : null
               return (
@@ -556,6 +694,11 @@ export function SnaptradeConnectCard() {
                       {formattedValue && (
                         <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                           {formattedValue}
+                          {formattedValueNative && (
+                            <span className="block text-xs font-normal text-slate-500">
+                              Native: {formattedValueNative}
+                            </span>
+                          )}
                         </span>
                       )}
                     </div>
@@ -567,12 +710,28 @@ export function SnaptradeConnectCard() {
                     <p className="text-sm text-slate-500">No positions reported for this account yet.</p>
                   ) : (
                     <div className="overflow-x-auto">
+                      {allPositions.length > 5 && (
+                        <div className="mb-2 flex items-center justify-end">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() =>
+                              setExpandedAccounts((prev) => ({
+                                ...prev,
+                                [accountKey]: !isExpanded,
+                              }))
+                            }
+                          >
+                            {isExpanded ? "Show fewer" : `Show all (${allPositions.length})`}
+                          </Button>
+                        </div>
+                      )}
                       <table className="min-w-full text-sm">
                         <thead>
                           <tr className="text-left text-slate-500">
                             <th className="pb-1 pr-4">Symbol</th>
                             <th className="pb-1 pr-4">Units</th>
-                            <th className="pb-1 pr-4">Last price</th>
+                            <th className="pb-1 pr-4">Value ({baseCurrency})</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -581,6 +740,41 @@ export function SnaptradeConnectCard() {
                               position.symbol?.symbol?.raw_symbol ??
                               ""
                             const description = position.symbol?.symbol?.description ?? ""
+                            const priceCurrency =
+                              normalizeCurrencyCode(position.currency) ??
+                              normalizeCurrencyCode(position.symbol?.symbol?.currency ?? null) ??
+                              baseCurrency ??
+                              "USD"
+                            const nativeUnits =
+                              typeof position.units === "number"
+                                ? position.units
+                                : typeof position.fractional_units === "number"
+                                  ? position.fractional_units
+                                  : null
+                            const nativeValue =
+                              typeof position.price === "number" && typeof nativeUnits === "number"
+                                ? position.price * nativeUnits
+                                : null
+                            const valueBase =
+                              typeof position.value_base === "number"
+                                ? position.value_base
+                                : typeof nativeValue === "number"
+                                  ? nativeValue * (typeof position.fx_to_base === "number" ? position.fx_to_base : 1)
+                                  : null
+                            const formattedValueBase =
+                              typeof valueBase === "number"
+                                ? new Intl.NumberFormat("en-US", {
+                                    style: "currency",
+                                    currency: baseCurrency,
+                                  }).format(valueBase)
+                                : ""
+                            const formattedNativeValue =
+                              nativeValue !== null
+                                ? new Intl.NumberFormat("en-US", {
+                                    style: "currency",
+                                    currency: priceCurrency,
+                                  }).format(nativeValue)
+                                : ""
                             return (
                               <tr key={`${ticker}-${positionIdx}`} className="border-t border-slate-100">
                                 <td className="py-2 pr-4">
@@ -591,15 +785,56 @@ export function SnaptradeConnectCard() {
                                 </td>
                                 <td className="py-2 pr-4">{position.units ?? ""}</td>
                                 <td className="py-2 pr-4">
-                                  {typeof position.price === "number" ? `$${position.price.toFixed(2)}` : ""}
+                                  {formattedValueBase}
+                                  {formattedNativeValue && priceCurrency !== baseCurrency && (
+                                    <span className="block text-xs text-slate-500">
+                                      Native: {formattedNativeValue}
+                                    </span>
+                                  )}
                                 </td>
                               </tr>
                             )
                           })}
+                          {typeof cashAmount === "number" && (
+                            <tr className="border-t border-slate-100">
+                              <td className="py-2 pr-4">
+                                <span className="font-medium text-slate-900">Cash</span>
+                              </td>
+                              <td className="py-2 pr-4"></td>
+                              <td className="py-2 pr-4">
+                                {typeof cashBaseAmount === "number"
+                                  ? new Intl.NumberFormat("en-US", {
+                                      style: "currency",
+                                      currency: baseCurrency,
+                                    }).format(cashBaseAmount)
+                                  : null}
+                                {typeof cashAmount === "number" &&
+                                  cashCurrency &&
+                                  cashCurrency !== baseCurrency && (
+                                    <span className="block text-xs text-slate-500">
+                                      Native:{" "}
+                                      {new Intl.NumberFormat("en-US", {
+                                        style: "currency",
+                                        currency: cashCurrency ?? baseCurrency,
+                                      }).format(cashAmount)}
+                                    </span>
+                                  )}
+                              </td>
+                            </tr>
+                          )}
                         </tbody>
                       </table>
                     </div>
                   )}
+                  <div className="flex items-center justify-end pt-3">
+                    <Button
+                      size="sm"
+                      onClick={() => openImportModal(accountId ?? null, name)}
+                      disabled={importing}
+                    >
+                      Import holdings
+                    </Button>
+                  </div>
                 </div>
               )
             })}
@@ -607,5 +842,67 @@ export function SnaptradeConnectCard() {
         )}
       </CardContent>
     </Card>
+
+    <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Import holdings</DialogTitle>
+          <DialogDescription>
+            Create a new portfolio from your connected broker holdings. We will save a snapshot and take you to the new
+            portfolio.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div>
+            <p className="text-xs text-slate-500">From account</p>
+            <p className="text-sm font-medium text-slate-800">{importAccountLabel || "Selected broker account"}</p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="import-name">Portfolio name</Label>
+            <Input
+              id="import-name"
+              value={importPortfolioName}
+              onChange={(e) => setImportPortfolioName(e.target.value)}
+              placeholder="My portfolio"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="import-description">Description (optional)</Label>
+            <Textarea
+              id="import-description"
+              value={importPortfolioDescription}
+              onChange={(e) => setImportPortfolioDescription(e.target.value)}
+              placeholder="e.g. Imported from your broker via SnapTrade"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Base currency</Label>
+            <Select value={importBaseCurrency} onValueChange={(val) => setImportBaseCurrency(val)}>
+              <SelectTrigger className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {BASE_CURRENCY_OPTIONS.map((code) => (
+                  <SelectItem key={code} value={code}>
+                    {code}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-slate-500">Totals and analytics will be shown in this currency.</p>
+          </div>
+          {importError && <p className="text-sm text-red-600">{importError}</p>}
+        </div>
+        <DialogFooter className="gap-2">
+          <Button variant="outline" onClick={() => setImportDialogOpen(false)} disabled={importing}>
+            Cancel
+          </Button>
+          <LoadingButton onClick={handleImportSubmit} loading={importing}>
+            Import and continue
+          </LoadingButton>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   )
 }

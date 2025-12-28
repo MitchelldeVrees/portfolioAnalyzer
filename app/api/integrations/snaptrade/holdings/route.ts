@@ -26,9 +26,10 @@ export async function GET(request: NextRequest) {
     if (!user) {
       return applyCookieMutations(NextResponse.json({ error: "Not authenticated" }, { status: 401 }), cookieMutations)
     }
-
+    console.log(supabase);
+    console.log(user);
     const details = await getSnaptradeHoldingsDetails(supabase, user.id)
-
+    console.log(details);
     if (details.status === "pending" || details.status === "none") {
       const status = details.status === "pending" ? 425 : 412
       return applyCookieMutations(
@@ -48,6 +49,10 @@ export async function GET(request: NextRequest) {
           ok: true,
           holdings: details.accounts,
           summary: details.summary,
+          summaryBase: details.summaryBase,
+          baseCurrency: details.baseCurrency ?? "USD",
+          fxRates: details.fxRates ?? null,
+          snaptradeUserId: details.snaptradeUserId ?? null,
         },
         { status: 200 },
       ),

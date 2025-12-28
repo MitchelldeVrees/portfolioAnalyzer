@@ -222,9 +222,7 @@ export function HoldingsAnalysis({
                 Refreshed {formatDistanceToNow(new Date(data.meta.refreshedAt), { addSuffix: true })}
               </p>
             )}
-            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              All values converted to {baseCurrency}.
-            </p>
+           
           </div>
           
         </CardHeader>
