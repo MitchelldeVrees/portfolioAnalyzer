@@ -36,12 +36,19 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
 
   const metrics = data?.metrics || {};
   const risk = data?.risk || {};
+  const hasPerformanceHistory = Array.isArray(data?.performance) && data.performance.length > 1;
   const concentrationLevel = risk?.concentration?.level ?? "—";
   const largestPositionPct = risk?.concentration?.largestPositionPct ?? null;
   const diversificationScore = risk?.diversification?.score ?? null;
   const diversificationHoldings = risk?.diversification?.holdings ?? null;
   const diversificationTop2 = risk?.diversification?.top2Pct ?? null;
   const portfolioBetaSpx = typeof metrics.portfolioBetaSpx === "number" ? metrics.portfolioBetaSpx : null;
+  const portfolioReturn = hasPerformanceHistory && typeof metrics.historicalPortfolioReturn === "number" ? metrics.historicalPortfolioReturn : null;
+  const benchmarkReturn = hasPerformanceHistory && typeof metrics.benchmarkReturn === "number" ? metrics.benchmarkReturn : null;
+  const volatility = hasPerformanceHistory && typeof metrics.volatility === "number" ? metrics.volatility : null;
+  const sharpeRatio = hasPerformanceHistory && typeof metrics.sharpeRatio === "number" ? metrics.sharpeRatio : null;
+  const attributionCoverage = portfolio?.advanced?.attribution?.coverage;
+  const fundamentalsCoverage = portfolio?.advanced?.fundamentals?.coverage;
 
   const holdings: any[] = Array.isArray(portfolio.portfolio_holdings) ? portfolio.portfolio_holdings : [];
   const sectorByTicker: Record<string, string> = portfolio.sectorByTicker || {};
@@ -57,6 +64,16 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
   }
 
   const esc = (s: any) => escapeHtml(s ?? "");
+  const pct = (value: number | null, digits = 1) =>
+    value == null ? "—" : `${value > 0 ? "+" : ""}${value.toFixed(digits)}%`;
+  const largestHolding = holdings
+    .map((holding) => ({
+      ticker: String(holding?.ticker || "").toUpperCase(),
+      weight: typeof holding?.weight === "number"
+        ? (holding.weight > 1 ? holding.weight : holding.weight * 100)
+        : 0,
+    }))
+    .sort((a, b) => b.weight - a.weight)[0];
 
   return `
 <!DOCTYPE html>
@@ -93,6 +110,16 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
     .analysis-grid{display:grid;grid-template-columns:1.2fr .8fr;gap:12px}
     .subgrid{display:grid;grid-template-columns:1fr;gap:12px}
     .kpi{font-size:24px;font-weight:700}.small{font-size:11px;color:#64748b}
+    .eyebrow{font-size:10px;font-weight:700;letter-spacing:1.2px;text-transform:uppercase;color:#2563eb;margin-bottom:8px}
+    .hero{padding:22px;background:linear-gradient(135deg,#eff6ff,#f8fafc);border-left:4px solid #2563eb}
+    .kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:12px 0}
+    .kpi-card{background:#fff;border:1px solid #dbeafe;border-radius:8px;padding:10px}
+    .kpi-label{font-size:10px;color:#64748b;margin-bottom:4px}
+    .kpi-value{font-size:18px;font-weight:700;color:#0f172a}
+    .callout{border-left:4px solid #f59e0b;background:#fffbeb;padding:10px 12px;margin:10px 0;border-radius:4px}
+    .insight-list{margin:6px 0 0;padding-left:18px;font-size:12px;line-height:1.65}
+    .wide-table{font-size:10px}
+    .wide-table th,.wide-table td{padding:7px 4px}
     .two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     .pos{color:#059669}.neg{color:#dc2626}
     .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #e2e8f0;background:#ecfeff;border-radius:999px;padding:2px 8px;font-size:11px;color:#0e7490}
@@ -123,17 +150,32 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
     </div>
   </footer>
   <section class="page">
+    <div class="eyebrow">Portfolio intelligence</div>
     <h1>Portfolio Summary Report</h1>
-    <p class="muted">Prepared by ${esc(brandName)}</p>
-    <div class="block">
+    <p class="muted">A decision-ready view of performance, allocation, risk, income, and valuation.</p>
+    <div class="block hero">
       <h2>${esc(portfolio.name || "Portfolio")}</h2>
       <p>Date: <strong>${esc(currentDate)}</strong></p>
       <p>Report Owner: <strong>${esc(portfolio.profile?.full_name || "Portfolio Owner")}</strong></p>
     </div>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">YTD portfolio return</div><div class="kpi-value">${pct(portfolioReturn)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">${esc(benchmarkName)} YTD return</div><div class="kpi-value">${pct(benchmarkReturn)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Volatility</div><div class="kpi-value">${volatility == null ? "—" : volatility.toFixed(1) + "%"}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Sharpe ratio</div><div class="kpi-value">${sharpeRatio == null ? "—" : sharpeRatio.toFixed(2)}</div></div>
+    </div>
+    <div class="block">
+      <h3>At a glance</h3>
+      <ul class="insight-list">
+        <li><strong>${holdings.length}</strong> holdings; the largest position is <strong>${esc(largestHolding?.ticker || "unavailable")}</strong>${largestHolding ? ` at <strong>${largestHolding.weight.toFixed(1)}%</strong>` : ""}.</li>
+        <li>Concentration risk is <strong>${esc(concentrationLevel)}</strong>${diversificationScore != null ? ` with a diversification score of <strong>${diversificationScore}/10</strong>` : ""}.</li>
+        <li>Performance attribution covers <strong>${attributionCoverage?.weightPct ?? 0}%</strong> of portfolio weight; unavailable holdings are excluded rather than treated as zero-return assets.</li>
+      </ul>
+    </div>
     <div class="block">
       <p class="small">
-        This report was generated automatically by ${esc(brandName)}. It provides a holdings overview and sector-level analysis.
-        For full methodology, see the final page notes or your in-app “Analysis” tab.
+        This report was generated automatically by ${esc(brandName)} from portfolio records and third-party market data.
+        Missing market data is displayed as unavailable and excluded from aggregate calculations.
       </p>
       
     </div>
@@ -178,6 +220,13 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
   </section>
   <section class="page">
     <h2>Analysis</h2>
+    <div class="block avoid-break">
+      <h3>Performance Overview</h3>
+      ${performanceChartUri
+        ? `<img src="${performanceChartUri}" alt="Portfolio performance compared with benchmark" style="width:100%;height:auto;" />`
+        : `<p class="small muted">Not enough comparable price history to chart performance.</p>`
+      }
+    </div>
     <div class="analysis-grid">
       <div class="block avoid-break">
         <h3>Sector Allocation</h3>
@@ -321,12 +370,21 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
   </section>
   <section class="page">
     <h2>Performance Attribution (12m)</h2>
+    <div class="callout">
+      <p><strong>Data coverage:</strong> ${
+        attributionCoverage
+          ? `${attributionCoverage.holdings} of ${attributionCoverage.totalHoldings} holdings, representing ${attributionCoverage.weightPct}% of portfolio weight.`
+          : "Unavailable."
+      }</p>
+      <p class="small">Each holding is calculated from its own adjusted-price history. Holdings without sufficient history are omitted, not reported as 0%.</p>
+    </div>
     <div class="block avoid-break">
       ${portfolio?.advanced?.attribution?.chartUri
         ? `<img src="${portfolio.advanced.attribution.chartUri}" alt="Attribution Chart" style="width:100%;height:auto;" />`
         : `<p class="small muted">Not enough data to compute attribution.</p>`
       }
     </div>
+    ${Array.isArray(portfolio?.advanced?.attribution?.top) && portfolio.advanced.attribution.top.length ? `
     <div class="block avoid-break">
       <h3>Top Contributors & Detractors</h3>
       <table>
@@ -357,23 +415,28 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
         Contribution approximated as weight × total return over the last 12 months, using adjusted close series.
       </p>
     </div>
+    ` : ""}
   </section>
   
   <section class="page">
     <h2>Income & Valuation Snapshot</h2>
+    <div class="callout">
+      <p><strong>Provider coverage:</strong> Dividend yield ${fundamentalsCoverage?.dividendYieldPct ?? 0}%, trailing P/E ${fundamentalsCoverage?.trailingPE ?? 0}%, and forward P/E ${fundamentalsCoverage?.forwardPE ?? 0}% of portfolio weight.</p>
+      <p class="small">Weighted figures are normalized across holdings with available data. A dash means the provider did not return a usable value.</p>
+    </div>
     <div class="block avoid-break">
       ${portfolio?.advanced?.fundamentals?.chartUri
         ? `<img src="${portfolio.advanced.fundamentals.chartUri}" alt="Dividend Yield Chart" style="width:100%;height:auto;" />`
         : `<p class="small muted">Dividend data unavailable for charting.</p>`
       }
-      <p class="small muted" style="margin-top:6px;">
-        The above chart shows a comparison of dividend yields across holdings (e.g., bar chart sorted by weight). Use this to quickly identify high-yielders vs. growth-oriented holdings.
-      </p>
+      ${portfolio?.advanced?.fundamentals?.chartUri ? `<p class="small muted" style="margin-top:6px;">
+        Dividend yield comparison across holdings with available provider data.
+      </p>` : ""}
     </div>
     <div class="block avoid-break">
+      <h3>Weighted Portfolio Averages</h3>
       <div class="two">
         <div>
-          <h3>Weighted Portfolio Averages</h3>
           <table>
             <tbody>
               <tr><td>Dividend Yield (weighted)</td><td class="num">${
@@ -417,9 +480,16 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
             P/E, PEG, and P/B use harmonic means to avoid distortion from high multiples; yields, ROE, and D/E are portfolio-weighted averages.
           </p>
         </div>
-        <div>
+        <div class="small muted" style="padding:8px 4px;">
+          <p><strong>How to read this:</strong></p>
+          <p>Yield indicates the current income profile. P/E, PEG, and price/book provide valuation context. ROE summarizes profitability, while debt/equity highlights balance-sheet leverage.</p>
+          <p>These measures vary by sector and should be compared with relevant peers rather than used as standalone buy or sell signals.</p>
+        </div>
+      </div>
+    </div>
+    <div class="block avoid-break">
           <h3>Key Fundamentals by Holding</h3>
-          <table>
+          <table class="wide-table">
             <thead>
               <tr>
                 <th>Ticker</th>
@@ -454,10 +524,8 @@ export function generateProfessionalPDFHTML(portfolio: any): string {
             </tbody>
           </table>
           <p class="small muted" style="margin-top:6px;">
-            Holdings sorted by weight descending for easier comparison. Use this table to spot outliers (e.g., high D/E ratios indicating leverage risk or low PEG for value/growth balance).
+            Use this table to spot valuation, profitability, and leverage outliers. Missing values reflect provider coverage, not a zero value.
           </p>
-        </div>
-      </div>
     </div>
     
   </section>

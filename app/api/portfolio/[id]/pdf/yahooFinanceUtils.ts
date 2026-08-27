@@ -5,7 +5,8 @@ type Bar = { date: string; adjClose: number };
 export async function getDailyHistoryAdjClose(symbol: string, days = 252): Promise<Bar[]> {
   try {
     const end = Math.floor(Date.now() / 1000);
-    const start = end - Math.floor(days * 24 * 60 * 60 * 1.1);
+    // A trading year spans substantially more than 252 calendar days.
+    const start = end - Math.floor(days * 24 * 60 * 60 * 1.6);
     const ch: any = await yahooFinance.chart(symbol, {
       period1: start,
       period2: end,
@@ -16,7 +17,8 @@ export async function getDailyHistoryAdjClose(symbol: string, days = 252): Promi
     return quotes
       .filter((q: any) => typeof q.adjclose === "number" && q.date)
       .map((q: any) => ({ date: new Date(q.date).toISOString().slice(0, 10), adjClose: q.adjclose }));
-  } catch {
+  } catch (error) {
+    console.warn(`[pdf] price history unavailable for ${symbol}`, error instanceof Error ? error.message : error);
     return [];
   }
 }
@@ -38,6 +40,10 @@ export type FundRow = {
   trailingPE?: number | null;
   forwardPE?: number | null;
   dividendYield?: number | null;
+  pegRatio?: number | null;
+  priceToBook?: number | null;
+  returnOnEquity?: number | null;
+  debtToEquity?: number | null;
 };
 
 export async function getFundamentals(tickers: string[]): Promise<Record<string, FundRow>> {
@@ -45,19 +51,24 @@ export async function getFundamentals(tickers: string[]): Promise<Record<string,
   await Promise.all(tickers.map(async (t) => {
     try {
       const qs: any = await yahooFinance.quoteSummary(t, {
-        modules: ["summaryDetail", "defaultKeyStatistics", "price"],
+        modules: ["summaryDetail", "defaultKeyStatistics", "financialData", "price"],
       });
       const sd = qs?.summaryDetail || {};
       const ks = qs?.defaultKeyStatistics || {};
+      const fd = qs?.financialData || {};
       const symbol = (qs?.price?.symbol || t || "").toUpperCase();
-      out[symbol] = {
+      out[t.toUpperCase()] = {
         symbol,
         trailingPE: typeof sd?.trailingPE === "number" ? sd.trailingPE : (typeof ks?.trailingPE === "number" ? ks.trailingPE : null),
         forwardPE: typeof sd?.forwardPE === "number" ? sd.forwardPE : (typeof ks?.forwardPE === "number" ? ks.forwardPE : null),
         dividendYield: typeof sd?.dividendYield === "number" ? sd.dividendYield : null,
+        pegRatio: typeof ks?.pegRatio === "number" ? ks.pegRatio : null,
+        priceToBook: typeof ks?.priceToBook === "number" ? ks.priceToBook : null,
+        returnOnEquity: typeof fd?.returnOnEquity === "number" ? fd.returnOnEquity : null,
+        debtToEquity: typeof fd?.debtToEquity === "number" ? fd.debtToEquity : null,
       };
-    } catch {
-      // ignore
+    } catch (error) {
+      console.warn(`[pdf] fundamentals unavailable for ${t}`, error instanceof Error ? error.message : error);
     }
   }));
   return out;
