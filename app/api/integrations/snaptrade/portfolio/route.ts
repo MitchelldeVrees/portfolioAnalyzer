@@ -2,7 +2,10 @@ import { NextResponse, type NextRequest } from "next/server"
 
 import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supabase-route"
 import { assertSnaptradeConfigured, getSnaptradeClient } from "@/lib/snaptrade/client"
-import { ensureSnaptradeCredentials } from "@/lib/snaptrade/server"
+import {
+  logSnaptradeError,
+  withSnaptradeUserCredentials,
+} from "@/lib/snaptrade/server"
 import type { CookieMutation } from "@/lib/api/supabase-route"
 
 type SnaptradePosition = {
@@ -118,13 +121,19 @@ export async function POST(request: NextRequest) {
     const customName = payload?.portfolioName?.toString().trim()
     const requestedBaseCurrency = normalizeCurrencyCode(payload?.baseCurrency ?? null)
 
-    const { snaptradeUserId, snaptradeUserSecret } = await ensureSnaptradeCredentials(supabase, user.id)
     const snaptrade = getSnaptradeClient()
 
-    const holdingsResponse = await snaptrade.accountInformation.getAllUserHoldings({
-      userId: snaptradeUserId,
-      userSecret: snaptradeUserSecret,
-    })
+    const { holdingsResponse, snaptradeUserId, snaptradeUserSecret } = await withSnaptradeUserCredentials(
+      supabase,
+      user.id,
+      async (credentials) => ({
+        holdingsResponse: await snaptrade.accountInformation.getAllUserHoldings({
+          userId: credentials.snaptradeUserId,
+          userSecret: credentials.snaptradeUserSecret,
+        }),
+        ...credentials,
+      }),
+    )
 
     const accounts = Array.isArray(holdingsResponse.data)
       ? holdingsResponse.data
@@ -258,7 +267,7 @@ export async function POST(request: NextRequest) {
           )
         }
       } catch (activityError) {
-        console.error("[snaptrade] failed to fetch account activities", activityError)
+        logSnaptradeError("[snaptrade] failed to fetch account activities", activityError)
       }
 
       if (holdingsRows.length > 0) {
@@ -276,7 +285,7 @@ export async function POST(request: NextRequest) {
       cookieMutations,
     )
   } catch (error) {
-    console.error("[snaptrade] portfolio import failed", error)
+    logSnaptradeError("[snaptrade] portfolio import failed", error)
     const message = error instanceof Error ? error.message : "Failed to create portfolio"
     return applyCookieMutations(NextResponse.json({ error: message }, { status: 500 }), cookieMutations)
   }

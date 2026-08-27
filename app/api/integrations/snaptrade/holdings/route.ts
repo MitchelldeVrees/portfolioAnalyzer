@@ -3,6 +3,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supabase-route"
 import { assertSnaptradeConfigured } from "@/lib/snaptrade/client"
 import { getSnaptradeHoldingsDetails } from "@/lib/snaptrade/holdings"
+import { logSnaptradeError } from "@/lib/snaptrade/server"
 import type { CookieMutation } from "@/lib/api/supabase-route"
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -26,10 +27,7 @@ export async function GET(request: NextRequest) {
     if (!user) {
       return applyCookieMutations(NextResponse.json({ error: "Not authenticated" }, { status: 401 }), cookieMutations)
     }
-    console.log(supabase);
-    console.log(user);
     const details = await getSnaptradeHoldingsDetails(supabase, user.id)
-    console.log(details);
     if (details.status === "pending" || details.status === "none") {
       const status = details.status === "pending" ? 425 : 412
       return applyCookieMutations(
@@ -59,7 +57,7 @@ export async function GET(request: NextRequest) {
       cookieMutations,
     )
   } catch (error) {
-    console.error("[snaptrade] failed to load holdings", error)
+    logSnaptradeError("[snaptrade] failed to load holdings", error)
     const message = error instanceof Error ? error.message : "Unable to load holdings"
     return applyCookieMutations(NextResponse.json({ error: message }, { status: 500 }), cookieMutations)
   }

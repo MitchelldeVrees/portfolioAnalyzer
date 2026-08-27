@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server"
 
 import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supabase-route"
 import { getSnaptradeClient } from "@/lib/snaptrade/client"
+import { logSnaptradeError } from "@/lib/snaptrade/server"
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
@@ -37,7 +38,7 @@ export async function GET(request: NextRequest) {
 
     return applyCookieMutations(NextResponse.json({ ok: true, brokerages }, { status: 200 }), cookieMutations)
   } catch (error) {
-    console.error("[snaptrade] failed to list brokerages", error)
+    logSnaptradeError("[snaptrade] failed to list brokerages", error)
     const message = error instanceof Error ? error.message : "Unable to load brokerages"
     return applyCookieMutations(NextResponse.json({ error: message }, { status: 500 }), cookieMutations)
   }
