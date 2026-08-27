@@ -87,23 +87,24 @@ async function persistSnaptradeCredentials(
 async function refreshSnaptradeCredentials(
   supabase: SupabaseClient,
   userId: string,
-  snaptradeUserId: string,
+  currentCredentials: SnaptradeUserCredentials,
 ): Promise<SnaptradeUserCredentials> {
   const snaptrade = getSnaptradeClient()
   let response: { data: { userSecret?: string } }
 
   try {
     response = await snaptrade.authentication.resetSnapTradeUserSecret({
-      userId: snaptradeUserId,
+      userId: currentCredentials.snaptradeUserId,
+      userSecret: currentCredentials.snaptradeUserSecret,
     })
   } catch (error) {
     const snaptradeError = getSnaptradeError(error)
-    if (snaptradeError?.status !== 404) {
+    if (snaptradeError?.status !== 401 && snaptradeError?.status !== 404) {
       throw error
     }
 
     response = await snaptrade.authentication.registerSnapTradeUser({
-      userId: snaptradeUserId,
+      userId: currentCredentials.snaptradeUserId,
     })
   }
 
@@ -112,7 +113,10 @@ async function refreshSnaptradeCredentials(
     throw new Error("SnapTrade did not return a user secret")
   }
 
-  const credentials = { snaptradeUserId, snaptradeUserSecret }
+  const credentials = {
+    snaptradeUserId: currentCredentials.snaptradeUserId,
+    snaptradeUserSecret,
+  }
   await persistSnaptradeCredentials(supabase, userId, credentials)
   return credentials
 }
@@ -179,7 +183,7 @@ export async function withSnaptradeUserCredentials<T>(
       const refreshedCredentials = await refreshSnaptradeCredentials(
         supabase,
         userId,
-        credentials.snaptradeUserId,
+        credentials,
       )
       return await operation(refreshedCredentials)
     }
