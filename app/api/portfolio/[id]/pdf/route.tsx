@@ -49,7 +49,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       .select(`
         id, user_id, name, description, created_at, updated_at,
         portfolio_holdings (
-          id, ticker, weight, shares, purchase_price, created_at, updated_at
+          id, ticker, weight, shares, purchase_price, quote_symbol, currency_code, created_at, updated_at
         )
       `)
       .eq("id", params.id)
@@ -179,7 +179,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
           options: {
             plugins: {
               legend: { position: "top", labels: { font: { size: 12 } } },
-              title: { display: true, text: "Performance vs Benchmark (12m)" },
+              title: { display: true, text: "Performance vs Benchmark (YTD)" },
             },
             elements: { line: { tension: 0.25 } },
             scales: { y: { ticks: { callback: (v: any) => `${v}%` } } },
@@ -332,91 +332,133 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       }
     }
 
-    const tickers = holdings
-      .map(h => String(h?.ticker || "").toUpperCase())
-      .filter(t => t && t !== "CASH");
+    const marketHoldings = holdings.filter(h => {
+      const ticker = String(h?.ticker || "").toUpperCase();
+      return ticker && ticker !== "CASH";
+    });
+    const tickers = marketHoldings.map(h => String(h.ticker).toUpperCase());
+    const quoteSymbols = marketHoldings.map(h =>
+      String(h?.quote_symbol || h?.ticker || "").trim().toUpperCase()
+    );
 
     // 8) Performance attribution and analytics
     const [benchHist, ...holdHists] = await Promise.all([
       getDailyHistoryAdjClose(benchmark || "^GSPC", 252),
-      ...tickers.map(t => getDailyHistoryAdjClose(t, 252))
+      ...quoteSymbols.map(t => getDailyHistoryAdjClose(t, 252))
     ]);
 
     const benchRets = toDailyReturns(benchHist);
     const holdRetsArr = holdHists.map(h => toDailyReturns(h));
 
-    const allForAlign = [benchRets, ...holdRetsArr];
-    const datesCommon = alignByDate(allForAlign);
-    const datesRecent = datesCommon.slice(-130);
-
-    const rawWeights = tickers.map((t, i) => {
-      const w = typeof holdings[i]?.weight === "number" ? holdings[i].weight : 0;
+    const rawWeights = marketHoldings.map(h => {
+      const w = typeof h?.weight === "number" ? h.weight : 0;
       return w > 1 ? w/100 : w;
     });
     const wSum = rawWeights.reduce((s,x)=>s+(x||0),0) || 1;
     const weights = rawWeights.map(w => (w || 0)/wSum);
 
-    const benchVec = datesRecent.map(d => benchRets.find(x => x.date === d)?.r ?? 0);
-    const holdMat = holdRetsArr.map(arr => datesRecent.map(d => arr.find(x => x.date === d)?.r ?? 0));
-
-    const corrToBench = tickers.map((t, i) => ({
-      ticker: t,
-      corr: corr(holdMat[i], benchVec)
-    }))
+    const corrToBench = tickers.map((t, i) => {
+      const dates = alignByDate([benchRets, holdRetsArr[i]]).slice(-130);
+      const benchByDate = new Map(benchRets.map(x => [x.date, x.r]));
+      const holdingByDate = new Map(holdRetsArr[i].map(x => [x.date, x.r]));
+      return {
+        ticker: t,
+        corr: corr(
+          dates.map(d => benchByDate.get(d) as number),
+          dates.map(d => holdingByDate.get(d) as number),
+        ),
+      };
+    })
     .filter(x => isFinite(x.corr))
     .sort((a,b)=>b.corr - a.corr);
 
-    const portDaily = datesRecent.map((_, j) => {
-      let r = 0;
-      for (let i=0;i<holdMat.length;i++) r += weights[i] * holdMat[i][j];
-      return r;
+    const holdingReturnMaps = holdRetsArr.map(arr => new Map(arr.map(x => [x.date, x.r])));
+    const portDaily = benchRets.slice(-130).flatMap(({ date }) => {
+      let weightedReturn = 0;
+      let coveredWeight = 0;
+      for (let i = 0; i < holdingReturnMaps.length; i++) {
+        const value = holdingReturnMaps[i].get(date);
+        if (typeof value === "number") {
+          weightedReturn += weights[i] * value;
+          coveredWeight += weights[i];
+        }
+      }
+      return coveredWeight > 0 ? [weightedReturn / coveredWeight] : [];
     });
     const dailyVol = stddev(portDaily);
-    const annVol = dailyVol * Math.sqrt(252);
-    const var95 = (dailyVol * 1.65) * 100;
+    const annVol = Number.isFinite(dailyVol) ? dailyVol * Math.sqrt(252) : null;
+    const var95 = Number.isFinite(dailyVol) ? (dailyVol * 1.65) * 100 : null;
 
-    const twelveMonthDates = alignByDate([benchRets, ...holdRetsArr]);
-    const use12m = twelveMonthDates.slice(-252);
-    const totalReturn = (series: {date:string; r:number}[], ds: string[]) => {
-      const idxs = series.filter(x => ds.includes(x.date));
+    const totalReturn = (series: {date:string; r:number}[]) => {
+      const idxs = series.slice(-252);
+      if (idxs.length < 20) return null;
       let acc = 1;
       for (const x of idxs) acc *= (1 + (x.r || 0));
       return acc - 1;
     };
-    const attrib = tickers.map((t, i) => {
-      const ret = totalReturn(holdRetsArr[i], use12m);
+    const attributionRows = tickers.map((t, i) => {
+      const ret = totalReturn(holdRetsArr[i]);
+      if (ret == null || !Number.isFinite(ret)) return null;
       const contrib = (weights[i] || 0) * ret;
-      return { ticker: t, weight: (weights[i]||0)*100, ret: ret*100, contrib: contrib*100 };
-    })
-    .filter(x => isFinite(x.ret) && isFinite(x.contrib))
+      return {
+        ticker: t,
+        weight: (weights[i]||0)*100,
+        ret: ret*100,
+        contrib: contrib*100,
+        observations: holdRetsArr[i].length,
+      };
+    });
+    const attrib = attributionRows
+    .filter((x): x is NonNullable<typeof x> => x !== null)
     .sort((a,b)=>Math.abs(b.contrib) - Math.abs(a.contrib));
 
     const topContrib = attrib.slice(0, 8);
     const posContrib = attrib.filter(a => a.contrib >= 0).slice(0,5);
     const negContrib = attrib.filter(a => a.contrib < 0).slice(0,5);
 
-    const fMap = await getFundamentals(tickers);
+    const fMap = await getFundamentals(quoteSymbols);
     const fundRows = tickers.map((t, i) => {
-      const f = fMap[t] || {};
+      const f = fMap[quoteSymbols[i]] || {};
       return {
         ticker: t,
         weight: (weights[i]||0)*100,
         trailingPE: typeof f.trailingPE === "number" ? f.trailingPE : null,
         forwardPE: typeof f.forwardPE === "number" ? f.forwardPE : null,
         dividendYieldPct: typeof f.dividendYield === "number" ? f.dividendYield * 100 : null,
+        pegRatio: typeof f.pegRatio === "number" ? f.pegRatio : null,
+        priceToBook: typeof f.priceToBook === "number" ? f.priceToBook : null,
+        returnOnEquity: typeof f.returnOnEquity === "number" ? f.returnOnEquity : null,
+        debtToEquity: typeof f.debtToEquity === "number" ? f.debtToEquity : null,
       };
     });
 
-    const w = weights;
-    const yields = fundRows.map(r => (r.dividendYieldPct ?? 0)/100);
-    const wAvgYield = w.reduce((s,wi,idx)=> s + wi * (yields[idx] || 0), 0) * 100;
+    const weightedAverageAvailable = (values: Array<number | null>) => {
+      let total = 0;
+      let coveredWeight = 0;
+      values.forEach((value, index) => {
+        if (typeof value === "number" && Number.isFinite(value)) {
+          total += weights[index] * value;
+          coveredWeight += weights[index];
+        }
+      });
+      return coveredWeight > 0 ? total / coveredWeight : null;
+    };
+    const coverageWeight = (values: Array<number | null>) =>
+      values.reduce<number>((sum, value, index) =>
+        typeof value === "number" && Number.isFinite(value) ? sum + weights[index] : sum, 0
+      ) * 100;
 
     const trailingPEvals = fundRows.map(r => r.trailingPE ?? NaN);
     const forwardPEvals = fundRows.map(r => r.forwardPE ?? NaN);
-    const hTraPE = harmonicMean(trailingPEvals, w);
-    const hFwdPE = harmonicMean(forwardPEvals, w);
+    const hTraPE = harmonicMean(trailingPEvals, weights);
+    const hFwdPE = harmonicMean(forwardPEvals, weights);
+    const hPeg = harmonicMean(fundRows.map(r => r.pegRatio ?? NaN), weights);
+    const hPriceToBook = harmonicMean(fundRows.map(r => r.priceToBook ?? NaN), weights);
+    const wAvgYield = weightedAverageAvailable(fundRows.map(r => r.dividendYieldPct));
+    const wAvgRoe = weightedAverageAvailable(fundRows.map(r => r.returnOnEquity));
+    const wAvgDebtToEquity = weightedAverageAvailable(fundRows.map(r => r.debtToEquity));
 
-    const contribChartUri = await chartToDataUri({
+    const contribChartUri = topContrib.length ? await chartToDataUri({
       type: "bar",
       data: {
         labels: topContrib.map(x => x.ticker),
@@ -432,9 +474,9 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         plugins: { title: { display: true, text: "Top Contributors / Detractors (12m)" }, legend: { display: false } },
         scales: { y: { title: { display: true, text: "percentage points" } } }
       }
-    }, 1100, 420);
+    }, 1100, 420) : "";
 
-    const corrChartUri = await chartToDataUri({
+    const corrChartUri = corrToBench.length ? await chartToDataUri({
       type: "bar",
       data: {
         labels: corrToBench.map(x => x.ticker),
@@ -444,13 +486,13 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         plugins: { title: { display: true, text: "Holding Correlation to Benchmark (Pearson, %)" }, legend: { display: false } },
         scales: { y: { min: -100, max: 100 } }
       }
-    }, 1100, 420);
+    }, 1100, 420) : "";
 
     const yieldBars = fundRows
       .filter(r => typeof r.dividendYieldPct === "number")
       .sort((a,b)=> (b.dividendYieldPct! - a.dividendYieldPct!))
       .slice(0, 12);
-    const yieldChartUri = await chartToDataUri({
+    const yieldChartUri = yieldBars.length ? await chartToDataUri({
       type: "bar",
       data: {
         labels: yieldBars.map(r => r.ticker),
@@ -466,35 +508,41 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         plugins: { title: { display: true, text: "Dividend Yield by Holding (Top 12)" }, legend: { display: false } },
         scales: { y: { title: { display: true, text: "percent" } } }
       }
-    }, 1100, 420);
+    }, 1100, 420) : "";
 
     const advanced = {
-      attribution: { items: attrib, top: topContrib, positives: posContrib, negatives: negContrib, chartUri: contribChartUri },
+      attribution: {
+        items: attrib,
+        top: topContrib,
+        positives: posContrib,
+        negatives: negContrib,
+        chartUri: contribChartUri,
+        coverage: {
+          holdings: attrib.length,
+          totalHoldings: tickers.length,
+          weightPct: Number(coverageWeight(attributionRows.map(row => row?.ret ?? null)).toFixed(1)),
+        },
+      },
       corr: { items: corrToBench, chartUri: corrChartUri, annVol, var95 },
       fundamentals: {
         rows: fundRows,
         weighted: {
-          dividendYieldPct: Number.isFinite(wAvgYield) ? Number(wAvgYield.toFixed(2)) : null,
+          dividendYieldPct: wAvgYield != null ? Number(wAvgYield.toFixed(2)) : null,
           trailingPE_harmonic: hTraPE ? Number(hTraPE.toFixed(2)) : null,
           forwardPE_harmonic: hFwdPE ? Number(hFwdPE.toFixed(2)) : null,
+          pegRatio_harmonic: hPeg ? Number(hPeg.toFixed(2)) : null,
+          priceToBook_harmonic: hPriceToBook ? Number(hPriceToBook.toFixed(2)) : null,
+          returnOnEquity_weighted: wAvgRoe,
+          debtToEquity_weighted: wAvgDebtToEquity,
+        },
+        coverage: {
+          dividendYieldPct: Number(coverageWeight(fundRows.map(r => r.dividendYieldPct)).toFixed(1)),
+          trailingPE: Number(coverageWeight(fundRows.map(r => r.trailingPE)).toFixed(1)),
+          forwardPE: Number(coverageWeight(fundRows.map(r => r.forwardPE)).toFixed(1)),
         },
         chartUri: yieldChartUri,
       },
     };
-
-    const metrics = data?.metrics || {};
-    const risk = data?.risk || {};
-    const portfolioReturn = typeof metrics.portfolioReturn === "number" ? metrics.portfolioReturn : null;
-    const benchmarkReturn = typeof metrics.benchmarkReturn === "number" ? metrics.benchmarkReturn : null;
-    const volatility = typeof metrics.volatility === "number" ? metrics.volatility : null;
-    const sharpeRatio = typeof metrics.sharpeRatio === "number" ? metrics.sharpeRatio : null;
-    const maxDrawdown = typeof metrics.maxDrawdown === "number" ? metrics.maxDrawdown : null;
-    const concentrationLevel = risk?.concentration?.level ?? "—";
-    const largestPositionPct = risk?.concentration?.largestPositionPct ?? null;
-    const diversificationScore = risk?.diversification?.score ?? null;
-    const diversificationHoldings = risk?.diversification?.holdings ?? null;
-    const diversificationTop2 = risk?.diversification?.top2Pct ?? null;
-    const portfolioBetaSpx = typeof metrics.portfolioBetaSpx === "number" ? metrics.portfolioBetaSpx : null;
 
     // 9) Render HTML
     const pdfHtml = generateProfessionalPDFHTML({
@@ -550,5 +598,3 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
     return NextResponse.json({ error: "Failed to generate PDF" }, { status: 500 });
   }
 }
-
-
