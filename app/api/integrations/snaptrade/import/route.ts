@@ -3,7 +3,7 @@ import { NextResponse, type NextRequest } from "next/server"
 import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supabase-route"
 import type { CookieMutation } from "@/lib/api/supabase-route"
 import { assertSnaptradeConfigured, getSnaptradeClient } from "@/lib/snaptrade/client"
-import { ensureSnaptradeCredentials } from "@/lib/snaptrade/server"
+import { logSnaptradeError, withSnaptradeUserCredentials } from "@/lib/snaptrade/server"
 import {
   computeHoldingsSnapshot,
   persistHoldingsSnapshot,
@@ -120,13 +120,17 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { snaptradeUserId, snaptradeUserSecret } = await ensureSnaptradeCredentials(supabase, user.id)
     const snaptrade = getSnaptradeClient()
 
-    const holdingsResponse = await snaptrade.accountInformation.getAllUserHoldings({
-      userId: snaptradeUserId,
-      userSecret: snaptradeUserSecret,
-    })
+    const holdingsResponse = await withSnaptradeUserCredentials(
+      supabase,
+      user.id,
+      ({ snaptradeUserId, snaptradeUserSecret }) =>
+        snaptrade.accountInformation.getAllUserHoldings({
+          userId: snaptradeUserId,
+          userSecret: snaptradeUserSecret,
+        }),
+    )
 
     const accounts = Array.isArray(holdingsResponse.data)
       ? holdingsResponse.data
@@ -277,7 +281,7 @@ export async function POST(request: NextRequest) {
       cookieMutations,
     )
   } catch (error) {
-    console.error("[snaptrade] holdings import failed", error)
+    logSnaptradeError("[snaptrade] holdings import failed", error)
     const message = error instanceof Error ? error.message : "Failed to import holdings"
     return applyCookieMutations(NextResponse.json({ error: message }, { status: 500 }), cookieMutations)
   }

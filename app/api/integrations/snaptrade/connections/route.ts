@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server"
 
 import { applyCookieMutations, createRouteHandlerSupabase } from "@/lib/api/supabase-route"
 import { assertSnaptradeConfigured, getSnaptradeClient } from "@/lib/snaptrade/client"
-import { ensureSnaptradeCredentials } from "@/lib/snaptrade/server"
+import { logSnaptradeError, withSnaptradeUserCredentials } from "@/lib/snaptrade/server"
 import type { CookieMutation } from "@/lib/api/supabase-route"
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -27,13 +27,17 @@ export async function GET(request: NextRequest) {
       return applyCookieMutations(NextResponse.json({ error: "Not authenticated" }, { status: 401 }), cookieMutations)
     }
 
-    const { snaptradeUserId, snaptradeUserSecret } = await ensureSnaptradeCredentials(supabase, user.id)
     const snaptrade = getSnaptradeClient()
 
-    const { data } = await snaptrade.connections.listBrokerageAuthorizations({
-      userId: snaptradeUserId,
-      userSecret: snaptradeUserSecret,
-    })
+    const { data } = await withSnaptradeUserCredentials(
+      supabase,
+      user.id,
+      ({ snaptradeUserId, snaptradeUserSecret }) =>
+        snaptrade.connections.listBrokerageAuthorizations({
+          userId: snaptradeUserId,
+          userSecret: snaptradeUserSecret,
+        }),
+    )
 
     const parsedConnections = (Array.isArray(data) ? data : []).map((auth) => ({
       id: auth.id ?? "",
@@ -61,7 +65,7 @@ export async function GET(request: NextRequest) {
       cookieMutations,
     )
   } catch (error) {
-    console.error("[snaptrade] failed to list connections", error)
+    logSnaptradeError("[snaptrade] failed to list connections", error)
     const message = error instanceof Error ? error.message : "Unable to load connections"
     return applyCookieMutations(NextResponse.json({ error: message }, { status: 500 }), cookieMutations)
   }

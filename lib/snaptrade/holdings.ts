@@ -1,7 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js"
 
 import { getSnaptradeClient } from "@/lib/snaptrade/client"
-import { ensureSnaptradeCredentials } from "@/lib/snaptrade/server"
+import { withSnaptradeUserCredentials } from "@/lib/snaptrade/server"
 import { fetchFxRate } from "@/lib/market-data"
 
 type Authorization = {
@@ -155,66 +155,71 @@ export async function getSnaptradeHoldingsDetails(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<SnaptradeHoldingsSummary> {
-  const { snaptradeUserId, snaptradeUserSecret } = await ensureSnaptradeCredentials(supabase, userId)
   const snaptrade = getSnaptradeClient()
 
-  const { data: authorizations } = await snaptrade.connections.listBrokerageAuthorizations({
-    userId: snaptradeUserId,
-    userSecret: snaptradeUserSecret,
-  })
+  return withSnaptradeUserCredentials<SnaptradeHoldingsSummary>(
+    supabase,
+    userId,
+    async ({ snaptradeUserId, snaptradeUserSecret }) => {
+      const { data: authorizations } = await snaptrade.connections.listBrokerageAuthorizations({
+        userId: snaptradeUserId,
+        userSecret: snaptradeUserSecret,
+      })
 
-  const authList: Authorization[] = Array.isArray(authorizations) ? authorizations : []
-  const activeAuthorization = authList.find((auth) => !Boolean(auth.disabled))
-  const pendingAuthorization = authList.find((auth) => Boolean(auth.disabled))
+      const authList: Authorization[] = Array.isArray(authorizations) ? authorizations : []
+      const activeAuthorization = authList.find((auth) => !Boolean(auth.disabled))
+      const pendingAuthorization = authList.find((auth) => Boolean(auth.disabled))
 
-  if (!activeAuthorization) {
-    const brokerName =
-      pendingAuthorization?.brokerage?.display_name ??
-      pendingAuthorization?.brokerage?.name ??
-      pendingAuthorization?.brokerage?.slug ??
-      null
+      if (!activeAuthorization) {
+        const brokerName =
+          pendingAuthorization?.brokerage?.display_name ??
+          pendingAuthorization?.brokerage?.name ??
+          pendingAuthorization?.brokerage?.slug ??
+          null
 
-    const message = pendingAuthorization
-      ? `${brokerName ?? "Your broker"} is still provisioning read access. This step can take up to 24 hours—please try syncing again later.`
-      : null
+        const message = pendingAuthorization
+          ? `${brokerName ?? "Your broker"} is still provisioning read access. This step can take up to 24 hours—please try syncing again later.`
+          : null
 
-    return {
-      status: pendingAuthorization ? "pending" : "none",
-      snaptradeUserId,
-      pendingBroker: brokerName,
-      pendingMessage: message ?? "No active broker connection found. Connect a broker first to sync holdings.",
-    }
-  }
+        return {
+          status: pendingAuthorization ? "pending" : "none",
+          snaptradeUserId,
+          pendingBroker: brokerName,
+          pendingMessage: message ?? "No active broker connection found. Connect a broker first to sync holdings.",
+        }
+      }
 
-  const { data } = await snaptrade.accountInformation.getAllUserHoldings({
-    userId: snaptradeUserId,
-    userSecret: snaptradeUserSecret,
-  })
+      const { data } = await snaptrade.accountInformation.getAllUserHoldings({
+        userId: snaptradeUserId,
+        userSecret: snaptradeUserSecret,
+      })
 
-  const accountsRaw = Array.isArray(data) ? data : []
-  const summary = accountsRaw.reduce<{ total: number; currency?: string | null }>(
-    (acc, account) => {
-      const amount = account?.account?.balance?.total?.amount ?? 0
-      const currency = account?.account?.balance?.total?.currency ?? acc.currency
+      const accountsRaw = Array.isArray(data) ? data : []
+      const summary = accountsRaw.reduce<{ total: number; currency?: string | null }>(
+        (acc, account) => {
+          const amount = account?.account?.balance?.total?.amount ?? 0
+          const currency = account?.account?.balance?.total?.currency ?? acc.currency
+          return {
+            total: acc.total + amount,
+            currency,
+          }
+        },
+        { total: 0, currency: accountsRaw[0]?.account?.balance?.total?.currency ?? null },
+      )
+      const { accounts, summaryBase, baseCurrency, fxRates } = await attachBaseCurrencyToSnaptradeAccounts(
+        accountsRaw,
+        "USD",
+      )
+
       return {
-        total: acc.total + amount,
-        currency,
+        status: "ok",
+        snaptradeUserId,
+        baseCurrency,
+        fxRates,
+        accounts,
+        summary,
+        summaryBase,
       }
     },
-    { total: 0, currency: accountsRaw[0]?.account?.balance?.total?.currency ?? null },
   )
-  const { accounts, summaryBase, baseCurrency, fxRates } = await attachBaseCurrencyToSnaptradeAccounts(
-    accountsRaw,
-    "USD",
-  )
-
-  return {
-    status: "ok",
-    snaptradeUserId,
-    baseCurrency,
-    fxRates,
-    accounts,
-    summary,
-    summaryBase,
-  }
 }
